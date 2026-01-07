@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { marked } from 'marked';
 import { ArtifactManager } from './ArtifactManager';
 import {
   Artifact,
@@ -1164,6 +1165,68 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
       flex: 1;
     }
 
+    /* Markdown content styles */
+    .markdown-content {
+      line-height: 1.5;
+    }
+    .markdown-content p {
+      margin: 0.4em 0;
+    }
+    .markdown-content p:first-child {
+      margin-top: 0;
+    }
+    .markdown-content p:last-child {
+      margin-bottom: 0;
+    }
+    .markdown-content code {
+      background: var(--vscode-textCodeBlock-background);
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+    }
+    .markdown-content pre {
+      background: var(--vscode-textCodeBlock-background);
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+    .markdown-content pre code {
+      padding: 0;
+      background: transparent;
+    }
+    .markdown-content a {
+      color: var(--vscode-textLink-foreground);
+    }
+    .markdown-content a:hover {
+      text-decoration: underline;
+    }
+    .markdown-content ul, .markdown-content ol {
+      padding-left: 1.5em;
+      margin: 0.4em 0;
+    }
+    .markdown-content li {
+      margin: 0.2em 0;
+    }
+    .markdown-content blockquote {
+      border-left: 3px solid var(--vscode-textBlockQuote-border);
+      margin: 0.5em 0;
+      padding-left: 1em;
+      color: var(--vscode-textBlockQuote-foreground);
+    }
+    .markdown-content strong {
+      font-weight: 600;
+    }
+    .markdown-content h1, .markdown-content h2, .markdown-content h3,
+    .markdown-content h4, .markdown-content h5, .markdown-content h6 {
+      margin: 0.5em 0 0.3em 0;
+      font-weight: 600;
+    }
+    .markdown-content h1 { font-size: 1.4em; }
+    .markdown-content h2 { font-size: 1.2em; }
+    .markdown-content h3 { font-size: 1.1em; }
+
     /* File changes */
     .file-path {
       cursor: pointer;
@@ -2173,7 +2236,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
               <button class="task-status-btn ${item.status === 'completed' ? 'active' : ''}"
                       data-action="update-task-status" data-artifact-id="${artifact.id}" data-task-id="${item.id}" data-status="completed" title="Completed">●</button>
             </div>
-            <span class="task-text ${item.status === 'completed' ? 'completed' : ''}">${escapeHtml(item.text)}</span>
+            <span class="task-text markdown-content ${item.status === 'completed' ? 'completed' : ''}">${renderMarkdown(item.text)}</span>
             <span class="task-category">${item.category}</span>
             <button class="task-delete-btn" data-action="delete-task" data-artifact-id="${artifact.id}" data-task-id="${item.id}" title="Delete">×</button>
           </div>
@@ -2204,7 +2267,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
     const stats = this.implPlanProvider.getStats(artifact.id);
 
     return `
-      ${artifact.summary ? `<div class="plan-summary"><p>${escapeHtml(artifact.summary)}</p></div>` : ''}
+      ${artifact.summary ? `<div class="plan-summary markdown-content">${renderMarkdown(artifact.summary)}</div>` : ''}
 
       <div class="plan-stats">
         <span class="stat"><strong>${stats.totalSections}</strong> sections</span>
@@ -2224,7 +2287,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
             ${this.renderInlineCommentButton(artifact.id, section.id)}
             <button class="section-delete-btn" data-action="delete-section" data-artifact-id="${artifact.id}" data-section-id="${section.id}" title="Delete section">×</button>
           </div>
-          <p>${escapeHtml(section.description)}</p>
+          <div class="section-description markdown-content">${renderMarkdown(section.description)}</div>
 
           <div class="file-changes">
             ${section.changes
@@ -2235,7 +2298,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
                   ${change.changeType === 'create' ? '+' : change.changeType === 'delete' ? '-' : '~'}
                 </span>
                 <span class="file-path" data-action="open-file" data-file-path="${escapeHtml(change.filePath)}">${escapeHtml(change.filePath)}</span>
-                ${change.description ? `<span class="file-description">${escapeHtml(change.description)}</span>` : ''}
+                ${change.description ? `<span class="file-description markdown-content">${renderMarkdown(change.description)}</span>` : ''}
                 <button class="file-remove-btn" data-action="remove-file-change" data-artifact-id="${artifact.id}" data-section-id="${section.id}" data-file-path="${escapeHtml(change.filePath)}" title="Remove">×</button>
               </div>
             `
@@ -2280,7 +2343,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
     const stats = this.walkthroughProvider.getStats(artifact.id);
 
     return `
-      ${artifact.summary ? `<div class="walkthrough-summary"><p>${escapeHtml(artifact.summary)}</p></div>` : ''}
+      ${artifact.summary ? `<div class="walkthrough-summary markdown-content">${renderMarkdown(artifact.summary)}</div>` : ''}
 
       <div class="walkthrough-stats">
         <span class="stat"><strong>${stats.totalFiles}</strong> files changed</span>
@@ -2295,7 +2358,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
         <ul class="key-points">
           ${artifact.keyPoints.map((point, index) => `
             <li>
-              <span>${escapeHtml(point)}</span>
+              <span class="markdown-content">${renderMarkdown(point)}</span>
               <button class="remove-btn" data-action="remove-key-point" data-artifact-id="${artifact.id}" data-index="${index}" title="Remove">×</button>
             </li>
           `).join('')}
@@ -2316,7 +2379,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
             ${this.renderInlineCommentButton(artifact.id, section.id)}
             <button class="section-delete-btn" data-action="delete-walkthrough-section" data-artifact-id="${artifact.id}" data-section-id="${section.id}" title="Delete section">×</button>
           </div>
-          <div class="section-content">${escapeHtml(section.content)}</div>
+          <div class="section-content markdown-content">${renderMarkdown(section.content)}</div>
         </div>
       `
         )
@@ -2590,4 +2653,19 @@ function escapeHtml(text: string): string {
     "'": '&#039;',
   };
   return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+/**
+ * Configure marked options
+ */
+marked.setOptions({
+  breaks: true, // Convert line breaks to <br>
+  gfm: true, // GitHub Flavored Markdown
+});
+
+/**
+ * Render markdown to HTML
+ */
+function renderMarkdown(text: string): string {
+  return marked.parse(text) as string;
 }

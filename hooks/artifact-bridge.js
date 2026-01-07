@@ -511,6 +511,12 @@ function handleTodoWrite(toolInput, workspacePath) {
     writeMessage(inboxPath, message);
 
     console.log(`[artifact-bridge] Task list synced: ${items.length} tasks`);
+
+    // Check if all tasks are completed - update Walkthrough
+    const allCompleted = todos.length > 0 && todos.every(t => t.status === 'completed');
+    if (allCompleted) {
+      finalizeWalkthrough(workspacePath, todos);
+    }
   } catch (error) {
     console.error('[artifact-bridge] Error handling TodoWrite:', error.message);
   }
@@ -723,6 +729,95 @@ function updateWalkthroughArtifact(workspacePath, state) {
 
   const inboxPath = getInboxPath(workspacePath);
   writeMessage(inboxPath, message);
+}
+
+/**
+ * Generate task summary content
+ */
+function generateTaskSummary(todos) {
+  const completedCount = todos.length;
+  let summary = `총 ${completedCount}개의 작업이 완료되었습니다.\n\n`;
+
+  todos.forEach((todo, index) => {
+    const text = todo.content || todo.text || '';
+    summary += `${index + 1}. ${text}\n`;
+  });
+
+  return summary;
+}
+
+/**
+ * Finalize Walkthrough when all tasks are completed
+ * Updates the Walkthrough with:
+ * - Changed files from session state
+ * - Completed tasks as key points
+ * - Task summary section
+ */
+function finalizeWalkthrough(workspacePath, completedTodos) {
+  try {
+    const state = loadState(workspacePath);
+
+    // Convert completed tasks to key points
+    const keyPoints = completedTodos.map(t => t.content || t.text || '');
+
+    // Build changed files from state
+    const changedFiles = (state.changedFiles || []).map(f => ({
+      filePath: f.filePath,
+      changeType: f.changeType,
+      linesAdded: f.linesAdded || 0,
+      linesRemoved: f.linesRemoved || 0,
+      summary: `${f.changeCount || 1} change(s)`,
+    }));
+
+    // Calculate totals
+    const totalAdded = changedFiles.reduce((sum, f) => sum + f.linesAdded, 0);
+    const totalRemoved = changedFiles.reduce((sum, f) => sum + f.linesRemoved, 0);
+
+    // Build sections
+    const sections = [];
+
+    // Changes summary section (if there are changed files)
+    if (changedFiles.length > 0) {
+      sections.push({
+        id: 'changes-summary',
+        title: 'Changes Summary',
+        content: `${changedFiles.length} files changed (+${totalAdded}/-${totalRemoved} lines)`,
+        order: 1,
+      });
+    }
+
+    // Task summary section at the end
+    sections.push({
+      id: 'task-summary',
+      title: 'Completed Tasks Summary',
+      content: generateTaskSummary(completedTodos),
+      order: 999,
+    });
+
+    const message = createMessage('artifact', {
+      action: 'update',
+      artifact: {
+        id: 'claude-code-walkthrough',
+        type: 'walkthrough',
+        title: 'Session Walkthrough',
+        status: 'completed',
+        summary: `${completedTodos.length} tasks completed. ${changedFiles.length} files changed.`,
+        keyPoints,
+        sections,
+        changedFiles,
+        comments: [],
+        createdAt: state.startedAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const inboxPath = getInboxPath(workspacePath);
+    writeMessage(inboxPath, message);
+
+    console.log(`[artifact-bridge] Walkthrough finalized: ${completedTodos.length} tasks, ${changedFiles.length} files`);
+  } catch (error) {
+    console.error('[artifact-bridge] Error finalizing walkthrough:', error.message);
+  }
 }
 
 /**
