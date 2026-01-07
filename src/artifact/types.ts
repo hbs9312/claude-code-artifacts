@@ -285,3 +285,212 @@ export interface TaskGroupMessage {
 
 // Extended IPC Message types for Agent Mode
 export type AgentMessage = AgentModeChangeMessage | TaskGroupMessage;
+
+// ============================================
+// Real-time Sync Types
+// ============================================
+
+/**
+ * Claude's current operational state
+ */
+export type ClaudeState =
+  | 'idle'
+  | 'thinking'
+  | 'planning'
+  | 'executing'
+  | 'waiting-for-input'
+  | 'waiting-for-approval'
+  | 'error';
+
+/**
+ * Claude state message for real-time status updates
+ */
+export interface ClaudeStateMessage {
+  state: ClaudeState;
+  description?: string;
+  progress?: {
+    current: number;
+    total: number;
+    label?: string;
+  };
+  startedAt: number;
+  updatedAt?: number;
+}
+
+// ============================================
+// Plan Options Types
+// ============================================
+
+/**
+ * A single option in a multi-choice plan selection
+ */
+export interface PlanOption {
+  id: string;
+  title: string;
+  description: string;
+  pros?: string[];
+  cons?: string[];
+  estimatedEffort?: 'low' | 'medium' | 'high';
+  recommended?: boolean;
+}
+
+/**
+ * Message for presenting options to user
+ */
+export interface PlanOptionsMessage {
+  action: 'present-options';
+  artifactId: string;
+  prompt: string;
+  options: PlanOption[];
+  allowCustom?: boolean;
+  timeout?: number;
+}
+
+/**
+ * User's option selection response
+ */
+export interface OptionSelectionMessage {
+  artifactId: string;
+  action: 'option-selected';
+  selectedOptionId: string | null;
+  customResponse?: string;
+  timestamp: number;
+}
+
+// ============================================
+// Comment Discussion Types
+// ============================================
+
+/**
+ * Request type for comment discussions
+ */
+export type DiscussionRequestType = 'answer-question' | 'clarify' | 'revise-plan';
+
+/**
+ * Message for requesting Claude's response to comments
+ */
+export interface CommentDiscussionMessage {
+  action: 'request-discussion';
+  artifactId: string;
+  threadId: string;
+  comments: Comment[];
+  requestType: DiscussionRequestType;
+}
+
+/**
+ * Suggested revision to a plan section
+ */
+export interface PlanRevision {
+  sectionId: string;
+  revisionType: 'modify' | 'add' | 'remove';
+  originalContent?: string;
+  proposedContent: string;
+  reason: string;
+}
+
+/**
+ * Claude's response in a discussion thread
+ */
+export interface ClaudeDiscussionResponse {
+  action: 'discussion-response';
+  artifactId: string;
+  threadId: string;
+  response: {
+    content: string;
+    author: 'agent';
+    suggestedRevisions?: PlanRevision[];
+    resolved?: boolean;
+  };
+}
+
+// ============================================
+// Extended IPC Message Types
+// ============================================
+
+/**
+ * All possible IPC message types
+ */
+export type IPCMessageType =
+  | 'artifact'
+  | 'feedback'
+  | 'status'
+  | 'error'
+  | 'state'
+  | 'options'
+  | 'option-response'
+  | 'discussion'
+  | 'discussion-response';
+
+/**
+ * Extended IPC Message wrapper with new types
+ */
+export interface ExtendedIPCMessage {
+  id: string;
+  timestamp: number;
+  type: IPCMessageType;
+  payload:
+    | ArtifactMessage
+    | FeedbackMessage
+    | IPCStatusMessage
+    | IPCErrorMessage
+    | ClaudeStateMessage
+    | PlanOptionsMessage
+    | OptionSelectionMessage
+    | CommentDiscussionMessage
+    | ClaudeDiscussionResponse;
+}
+
+/**
+ * Type guard for ClaudeStateMessage
+ */
+export function isClaudeStateMessage(payload: unknown): payload is ClaudeStateMessage {
+  return typeof payload === 'object' && payload !== null && 'state' in payload;
+}
+
+/**
+ * Type guard for PlanOptionsMessage
+ */
+export function isPlanOptionsMessage(payload: unknown): payload is PlanOptionsMessage {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'action' in payload &&
+    (payload as PlanOptionsMessage).action === 'present-options'
+  );
+}
+
+/**
+ * Type guard for OptionSelectionMessage
+ */
+export function isOptionSelectionMessage(payload: unknown): payload is OptionSelectionMessage {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'action' in payload &&
+    (payload as OptionSelectionMessage).action === 'option-selected'
+  );
+}
+
+/**
+ * Type guard for CommentDiscussionMessage
+ */
+export function isCommentDiscussionMessage(payload: unknown): payload is CommentDiscussionMessage {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'action' in payload &&
+    (payload as CommentDiscussionMessage).action === 'request-discussion'
+  );
+}
+
+/**
+ * Type guard for ClaudeDiscussionResponse
+ */
+export function isClaudeDiscussionResponse(payload: unknown): payload is ClaudeDiscussionResponse {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'action' in payload &&
+    (payload as ClaudeDiscussionResponse).action === 'discussion-response'
+  );
+}

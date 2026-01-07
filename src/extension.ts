@@ -458,6 +458,47 @@ export function activate(context: vscode.ExtensionContext): void {
     console.log('Disconnected from Claude Code CLI');
   });
 
+  // Listen for Claude state changes
+  ipcClient.onDidChangeClaudeState(state => {
+    console.log('Claude state changed:', state.state, state.description);
+    // ArtifactProvider is already updated via MessageHandler
+  });
+
+  // Listen for option selection from webview
+  artifactProvider.onOptionSelected(async selection => {
+    console.log('Option selected:', selection);
+    if (ipcClient.connected) {
+      await ipcClient.sendOptionSelection(
+        selection.artifactId,
+        selection.optionId,
+        selection.customResponse
+      );
+    }
+  });
+
+  // Listen for Ask Claude requests from webview
+  artifactProvider.onAskClaude(async request => {
+    console.log('Ask Claude request:', request);
+    if (ipcClient.connected) {
+      const artifact = artifactManager.getArtifact(request.artifactId);
+      if (artifact) {
+        const comments = artifact.comments.filter(c => {
+          if (request.sectionId) {
+            return c.sectionId === request.sectionId;
+          }
+          return true;
+        });
+
+        await ipcClient.sendDiscussionRequest(
+          request.artifactId,
+          request.threadId,
+          comments,
+          'answer-question'
+        );
+      }
+    }
+  });
+
   // Show welcome message on first activation
   const hasShownWelcome = context.globalState.get('hasShownWelcome');
   if (!hasShownWelcome) {

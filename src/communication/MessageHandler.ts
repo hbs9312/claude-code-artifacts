@@ -13,6 +13,11 @@ import {
   TaskListArtifact,
   ImplementationPlanArtifact,
   WalkthroughArtifact,
+  ClaudeStateMessage,
+  PlanOptionsMessage,
+  ClaudeDiscussionResponse,
+  isPlanOptionsMessage,
+  isClaudeDiscussionResponse,
 } from '../artifact/types';
 
 /**
@@ -21,13 +26,23 @@ import {
  */
 export class MessageHandler implements vscode.Disposable {
   private disposables: vscode.Disposable[] = [];
+  private statusBarItem: vscode.StatusBarItem;
 
   constructor(
     private readonly ipcClient: IPCClient,
     private readonly artifactManager: ArtifactManager,
     private readonly artifactProvider: ArtifactProvider
   ) {
+    // Create status bar item for Claude state
+    this.statusBarItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      100
+    );
+    this.statusBarItem.name = 'Claude State';
+    this.disposables.push(this.statusBarItem);
+
     this.setupMessageListener();
+    this.setupStateListener();
   }
 
   /**
@@ -45,12 +60,26 @@ export class MessageHandler implements vscode.Disposable {
   }
 
   /**
+   * Set up listener for Claude state changes
+   */
+  private setupStateListener(): void {
+    const stateDisposable = this.ipcClient.onDidChangeClaudeState(state => {
+      this.handleStateChange(state);
+    });
+
+    this.disposables.push(stateDisposable);
+  }
+
+  /**
    * Handle an incoming IPC message
    */
   private async handleMessage(message: IPCMessage): Promise<void> {
     console.log('Handling message:', message.type, message.id);
 
-    switch (message.type) {
+    // Handle extended message types
+    const extendedType = (message as any).type;
+
+    switch (extendedType) {
       case 'artifact':
         await this.handleArtifactMessage(message.payload as ArtifactMessage);
         break;
@@ -66,8 +95,159 @@ export class MessageHandler implements vscode.Disposable {
         vscode.window.showErrorMessage(`CLI Error [${errorPayload.code}]: ${errorPayload.message}`);
         break;
 
+      case 'state':
+        // Claude state update
+        this.handleStateChange(message.payload as unknown as ClaudeStateMessage);
+        break;
+
+      case 'options':
+        // Options for user selection
+        await this.handleOptionsMessage(message.payload as unknown as PlanOptionsMessage);
+        break;
+
+      case 'discussion-response':
+        // Claude's response to a discussion
+        await this.handleDiscussionResponse(message.payload as unknown as ClaudeDiscussionResponse);
+        break;
+
       default:
-        console.warn('Unknown message type:', message.type);
+        console.warn('Unknown message type:', extendedType);
+    }
+  }
+
+  /**
+   * Handle Claude state changes
+   */
+  private handleStateChange(state: ClaudeStateMessage): void {
+    // Update status bar
+    this.updateStatusBar(state);
+
+    // Update artifact provider
+    this.artifactProvider.updateClaudeState(state);
+
+    // Show notification for waiting states
+    if (state.state === 'waiting-for-approval') {
+      vscode.window.showInformationMessage(
+        'Claude is waiting for plan approval',
+        'View Plan'
+      ).then(action => {
+        if (action === 'View Plan') {
+          vscode.commands.executeCommand('claudeArtifacts.showPanel');
+        }
+      });
+    }
+  }
+
+  /**
+   * Update status bar with Claude state
+   */
+  private updateStatusBar(state: ClaudeStateMessage): void {
+    const stateIcons: Record<string, string> = {
+      'idle': '$(circle-outline)',
+      'thinking': '$(loading~spin)',
+      'planning': '$(list-unordered)',
+      'executing': '$(debug-start)',
+      'waiting-for-input': '$(comment-discussion)',
+      'waiting-for-approval': '$(eye)',
+      'error': '$(error)',
+    };
+
+    const stateColors: Record<string, string> = {
+      'idle': 'statusBar.foreground',
+      'thinking': 'charts.yellow',
+      'planning': 'charts.blue',
+      'executing': 'charts.green',
+      'waiting-for-input': 'charts.orange',
+      'waiting-for-approval': 'charts.purple',
+      'error': 'charts.red',
+    };
+
+    const icon = stateIcons[state.state] || '$(circle-outline)';
+    const description = state.description || state.state;
+
+    this.statusBarItem.text = `${icon} Claude: ${description}`;
+    this.statusBarItem.tooltip = `Claude Code State: ${state.state}\n${description}`;
+
+    if (state.state === 'idle') {
+      this.statusBarItem.hide();
+    } else {
+      this.statusBarItem.show();
+    }
+  }
+
+  /**
+   * Handle options message - show options in VS Code
+   */
+  private async handleOptionsMessage(options: PlanOptionsMessage): Promise<void> {
+    console.log('Handling options message:', options.artifactId);
+
+    // Show options in the artifact provider webview
+    this.artifactProvider.showOptionsSelector(options);
+
+    // Also show VS Code quick pick as an alternative/fallback
+    const items = options.options.map(opt => ({
+      label: opt.recommended ? `$(star) ${opt.title}` : opt.title,
+      description: opt.description,
+      detail: opt.pros?.length ? `Pros: ${opt.pros.join(', ')}` : undefined,
+      optionId: opt.id,
+    }));
+
+    if (options.allowCustom) {
+      items.push({
+        label: '$(edit) Custom Response',
+        description: 'Type a custom response',
+        detail: undefined,
+        optionId: '__custom__',
+      });
+    }
+
+    const selected = await vscode.window.showQuickPick(items, {
+      placeHolder: options.prompt,
+      title: 'Select an Option',
+      ignoreFocusOut: true,
+    });
+
+    if (selected) {
+      if (selected.optionId === '__custom__') {
+        const customResponse = await vscode.window.showInputBox({
+          prompt: 'Enter your custom response',
+          placeHolder: 'Type here...',
+          ignoreFocusOut: true,
+        });
+
+        if (customResponse) {
+          await this.ipcClient.sendOptionSelection(options.artifactId, null, customResponse);
+        }
+      } else {
+        await this.ipcClient.sendOptionSelection(options.artifactId, selected.optionId);
+      }
+
+      // Clear the options selector in webview
+      this.artifactProvider.clearOptionsSelector();
+    }
+  }
+
+  /**
+   * Handle Claude's discussion response
+   */
+  private async handleDiscussionResponse(response: ClaudeDiscussionResponse): Promise<void> {
+    console.log('Handling discussion response:', response.artifactId, response.threadId);
+
+    // Add Claude's response as a comment (use threadId as sectionId for threading)
+    await this.artifactManager.addComment(
+      response.artifactId,
+      response.response.content,
+      'agent',
+      { sectionId: response.threadId }
+    );
+
+    // Update the artifact provider with revision suggestions
+    this.artifactProvider.handleDiscussionResponse(response);
+
+    // Refresh the panel
+    const artifact = this.artifactManager.getArtifact(response.artifactId);
+    if (artifact) {
+      this.artifactProvider.showArtifactPanel(artifact);
     }
   }
 

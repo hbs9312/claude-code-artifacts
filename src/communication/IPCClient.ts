@@ -10,6 +10,11 @@ import {
   FeedbackMessage,
   IPCStatusMessage,
   IPCErrorMessage,
+  ClaudeStateMessage,
+  OptionSelectionMessage,
+  CommentDiscussionMessage,
+  DiscussionRequestType,
+  Comment,
 } from '../artifact/types';
 
 /**
@@ -20,6 +25,15 @@ const DEFAULT_CONFIG: IPCConfig = {
   pollInterval: 500,
   retryAttempts: 3,
   retryDelay: 1000,
+};
+
+/**
+ * Adaptive polling configuration
+ */
+const ADAPTIVE_POLLING = {
+  ACTIVE_INTERVAL: 100,    // Fast polling when active
+  IDLE_INTERVAL: 500,      // Slow polling when idle
+  IDLE_THRESHOLD: 5000,    // Time before switching to idle mode
 };
 
 /**
@@ -60,24 +74,33 @@ export class IPCClient implements vscode.Disposable {
   private inboxPath: string;
   private outboxPath: string;
   private processedPath: string;
+  private statePath: string;
   private projectId: string;
   private workspacePath: string;
   private fileWatcher?: vscode.FileSystemWatcher;
+  private stateWatcher?: vscode.FileSystemWatcher;
   private pollTimer?: NodeJS.Timeout;
   private messageQueue: QueuedMessage[] = [];
   private isProcessing = false;
   private isConnected = false;
   private processedMessageIds = new Set<string>();
 
+  // Adaptive polling state
+  private lastActivityTime = 0;
+  private currentPollInterval = ADAPTIVE_POLLING.IDLE_INTERVAL;
+  private currentClaudeState: ClaudeStateMessage | null = null;
+
   private readonly _onDidReceiveMessage = new vscode.EventEmitter<IPCMessage>();
   private readonly _onDidConnect = new vscode.EventEmitter<void>();
   private readonly _onDidDisconnect = new vscode.EventEmitter<void>();
   private readonly _onError = new vscode.EventEmitter<Error>();
+  private readonly _onDidChangeClaudeState = new vscode.EventEmitter<ClaudeStateMessage>();
 
   public readonly onDidReceiveMessage = this._onDidReceiveMessage.event;
   public readonly onDidConnect = this._onDidConnect.event;
   public readonly onDidDisconnect = this._onDidDisconnect.event;
   public readonly onError = this._onError.event;
+  public readonly onDidChangeClaudeState = this._onDidChangeClaudeState.event;
 
   constructor(config?: Partial<IPCConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -92,6 +115,7 @@ export class IPCClient implements vscode.Disposable {
     this.inboxPath = path.join(this.basePath, 'inbox');
     this.outboxPath = path.join(this.basePath, 'outbox');
     this.processedPath = path.join(this.basePath, 'processed');
+    this.statePath = path.join(this.basePath, 'state');
   }
 
   /**
@@ -128,7 +152,7 @@ export class IPCClient implements vscode.Disposable {
    * Ensure IPC directories exist
    */
   private async ensureDirectories(): Promise<void> {
-    const dirs = [this.basePath, this.inboxPath, this.outboxPath, this.processedPath];
+    const dirs = [this.basePath, this.inboxPath, this.outboxPath, this.processedPath, this.statePath];
 
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) {
@@ -145,14 +169,107 @@ export class IPCClient implements vscode.Disposable {
     const inboxPattern = new vscode.RelativePattern(this.inboxPath, '*.json');
     this.fileWatcher = vscode.workspace.createFileSystemWatcher(inboxPattern);
 
-    this.fileWatcher.onDidCreate(uri => this.processIncomingFile(uri.fsPath));
-    this.fileWatcher.onDidChange(uri => this.processIncomingFile(uri.fsPath));
+    this.fileWatcher.onDidCreate(uri => {
+      this.recordActivity();
+      this.processIncomingFile(uri.fsPath);
+    });
+    this.fileWatcher.onDidChange(uri => {
+      this.recordActivity();
+      this.processIncomingFile(uri.fsPath);
+    });
 
-    // Also poll periodically in case watcher misses something
-    this.pollTimer = setInterval(() => this.pollInbox(), this.config.pollInterval || 500);
+    // Start state file watching
+    this.startStateWatching();
+
+    // Also poll periodically with adaptive interval
+    this.startAdaptivePolling();
 
     // Initial poll
     this.pollInbox();
+  }
+
+  /**
+   * Start watching the Claude state file
+   */
+  private startStateWatching(): void {
+    const stateFile = path.join(this.statePath, 'current.json');
+    const stateDir = path.dirname(stateFile);
+
+    // Ensure state directory exists
+    if (!fs.existsSync(stateDir)) {
+      fs.mkdirSync(stateDir, { recursive: true });
+    }
+
+    const statePattern = new vscode.RelativePattern(stateDir, 'current.json');
+    this.stateWatcher = vscode.workspace.createFileSystemWatcher(statePattern);
+
+    const handleStateChange = (uri: vscode.Uri) => {
+      this.recordActivity();
+      this.readStateFile(uri.fsPath);
+    };
+
+    this.stateWatcher.onDidCreate(handleStateChange);
+    this.stateWatcher.onDidChange(handleStateChange);
+
+    // Read initial state if exists
+    if (fs.existsSync(stateFile)) {
+      this.readStateFile(stateFile);
+    }
+  }
+
+  /**
+   * Read and emit state file changes
+   */
+  private readStateFile(filePath: string): void {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const state: ClaudeStateMessage = JSON.parse(content);
+
+      // Only emit if state actually changed
+      if (JSON.stringify(state) !== JSON.stringify(this.currentClaudeState)) {
+        this.currentClaudeState = state;
+        this._onDidChangeClaudeState.fire(state);
+      }
+    } catch (error) {
+      console.error('Error reading state file:', error);
+    }
+  }
+
+  /**
+   * Start adaptive polling based on activity
+   */
+  private startAdaptivePolling(): void {
+    const poll = () => {
+      this.pollInbox();
+      this.updatePollInterval();
+      this.pollTimer = setTimeout(poll, this.currentPollInterval);
+    };
+
+    this.pollTimer = setTimeout(poll, this.currentPollInterval);
+  }
+
+  /**
+   * Record activity for adaptive polling
+   */
+  private recordActivity(): void {
+    this.lastActivityTime = Date.now();
+  }
+
+  /**
+   * Update poll interval based on activity
+   */
+  private updatePollInterval(): void {
+    const timeSinceActivity = Date.now() - this.lastActivityTime;
+
+    if (timeSinceActivity < ADAPTIVE_POLLING.IDLE_THRESHOLD) {
+      this.currentPollInterval = ADAPTIVE_POLLING.ACTIVE_INTERVAL;
+    } else {
+      this.currentPollInterval = ADAPTIVE_POLLING.IDLE_INTERVAL;
+    }
   }
 
   /**
@@ -271,6 +388,58 @@ export class IPCClient implements vscode.Disposable {
       type: 'error',
       payload: error,
     });
+  }
+
+  /**
+   * Send an option selection to the CLI
+   */
+  public async sendOptionSelection(
+    artifactId: string,
+    selectedOptionId: string | null,
+    customResponse?: string
+  ): Promise<boolean> {
+    const selection: OptionSelectionMessage = {
+      artifactId,
+      action: 'option-selected',
+      selectedOptionId,
+      customResponse,
+      timestamp: Date.now(),
+    };
+
+    return this.send({
+      type: 'option-response' as 'feedback',
+      payload: selection as unknown as FeedbackMessage,
+    });
+  }
+
+  /**
+   * Send a discussion request to the CLI
+   */
+  public async sendDiscussionRequest(
+    artifactId: string,
+    threadId: string,
+    comments: Comment[],
+    requestType: DiscussionRequestType
+  ): Promise<boolean> {
+    const discussion: CommentDiscussionMessage = {
+      action: 'request-discussion',
+      artifactId,
+      threadId,
+      comments,
+      requestType,
+    };
+
+    return this.send({
+      type: 'discussion' as 'feedback',
+      payload: discussion as unknown as FeedbackMessage,
+    });
+  }
+
+  /**
+   * Get the current Claude state
+   */
+  public getClaudeState(): ClaudeStateMessage | null {
+    return this.currentClaudeState;
   }
 
   /**
@@ -438,10 +607,11 @@ export class IPCClient implements vscode.Disposable {
    */
   public dispose(): void {
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      clearTimeout(this.pollTimer);
     }
 
     this.fileWatcher?.dispose();
+    this.stateWatcher?.dispose();
 
     if (this.isConnected) {
       this.sendStatus('disconnected').catch(() => {});
@@ -453,5 +623,6 @@ export class IPCClient implements vscode.Disposable {
     this._onDidConnect.dispose();
     this._onDidDisconnect.dispose();
     this._onError.dispose();
+    this._onDidChangeClaudeState.dispose();
   }
 }

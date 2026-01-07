@@ -1,6 +1,16 @@
 import * as vscode from 'vscode';
 import { ArtifactManager } from './ArtifactManager';
-import { Artifact, FeedbackMessage, TaskCategory, TaskStatus, CommentThread } from './types';
+import {
+  Artifact,
+  FeedbackMessage,
+  TaskCategory,
+  TaskStatus,
+  CommentThread,
+  ClaudeStateMessage,
+  PlanOptionsMessage,
+  ClaudeDiscussionResponse,
+  PlanRevision,
+} from './types';
 import { TaskListProvider } from '../providers/TaskListProvider';
 import { ImplPlanProvider } from '../providers/ImplPlanProvider';
 import { WalkthroughProvider } from '../providers/WalkthroughProvider';
@@ -25,6 +35,11 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
   private implPlanProvider: ImplPlanProvider;
   private walkthroughProvider: WalkthroughProvider;
   private commentController: CommentController;
+
+  // Real-time sync state
+  private currentClaudeState: ClaudeStateMessage | null = null;
+  private pendingOptions: PlanOptionsMessage | null = null;
+  private pendingRevisions: PlanRevision[] = [];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -60,6 +75,50 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
 
   public getCommentController(): CommentController {
     return this.commentController;
+  }
+
+  // ============ Real-time Sync Methods ============
+
+  /**
+   * Update Claude state and refresh UI
+   */
+  public updateClaudeState(state: ClaudeStateMessage): void {
+    this.currentClaudeState = state;
+    this.updateWebview();
+  }
+
+  /**
+   * Show options selector in webview
+   */
+  public showOptionsSelector(options: PlanOptionsMessage): void {
+    this.pendingOptions = options;
+    this.updateWebview();
+  }
+
+  /**
+   * Clear options selector
+   */
+  public clearOptionsSelector(): void {
+    this.pendingOptions = null;
+    this.updateWebview();
+  }
+
+  /**
+   * Handle discussion response from Claude
+   */
+  public handleDiscussionResponse(response: ClaudeDiscussionResponse): void {
+    if (response.response.suggestedRevisions && response.response.suggestedRevisions.length > 0) {
+      this.pendingRevisions = response.response.suggestedRevisions;
+    }
+    this.updateWebview();
+  }
+
+  /**
+   * Clear pending revisions
+   */
+  public clearPendingRevisions(): void {
+    this.pendingRevisions = [];
+    this.updateWebview();
   }
 
   /**
@@ -269,8 +328,124 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
             message.lineNumber
           );
           break;
+
+        // Option selection
+        case 'selectOption':
+          await this.handleSelectOption(message.artifactId, message.optionId);
+          break;
+
+        case 'submitCustomOption':
+          await this.handleSubmitCustomOption(message.artifactId, message.customResponse);
+          break;
+
+        // Revision handling
+        case 'applyRevision':
+          await this.handleApplyRevision(message.artifactId, message.revisionIndex);
+          break;
+
+        case 'dismissRevision':
+          await this.handleDismissRevision(message.artifactId, message.revisionIndex);
+          break;
+
+        case 'applyAllRevisions':
+          await this.handleApplyAllRevisions(message.artifactId);
+          break;
+
+        case 'dismissAllRevisions':
+          await this.handleDismissAllRevisions(message.artifactId);
+          break;
+
+        // Ask Claude
+        case 'askClaude':
+          await this.handleAskClaude(message.artifactId, message.threadId, message.sectionId);
+          break;
       }
     });
+  }
+
+  // ============ Option Selection Handlers ============
+
+  private readonly _onOptionSelected = new vscode.EventEmitter<{
+    artifactId: string;
+    optionId: string | null;
+    customResponse?: string;
+  }>();
+  public readonly onOptionSelected = this._onOptionSelected.event;
+
+  private async handleSelectOption(artifactId: string, optionId: string): Promise<void> {
+    this._onOptionSelected.fire({ artifactId, optionId, customResponse: undefined });
+    this.pendingOptions = null;
+    this.updateWebview();
+  }
+
+  private async handleSubmitCustomOption(artifactId: string, customResponse: string): Promise<void> {
+    this._onOptionSelected.fire({ artifactId, optionId: null, customResponse });
+    this.pendingOptions = null;
+    this.updateWebview();
+  }
+
+  // ============ Revision Handlers ============
+
+  private async handleApplyRevision(artifactId: string, revisionIndex: number): Promise<void> {
+    const revision = this.pendingRevisions[revisionIndex];
+    if (!revision) return;
+
+    // Apply the revision to the artifact
+    // This would update the section with the proposed content
+    if (revision.revisionType === 'modify' || revision.revisionType === 'add') {
+      await this.implPlanProvider.updateSection(artifactId, revision.sectionId, {
+        description: revision.proposedContent,
+      });
+    } else if (revision.revisionType === 'remove') {
+      await this.implPlanProvider.deleteSection(artifactId, revision.sectionId);
+    }
+
+    // Remove the revision from pending
+    this.pendingRevisions.splice(revisionIndex, 1);
+    this.updateWebview();
+
+    vscode.window.showInformationMessage('Revision applied successfully.');
+  }
+
+  private async handleDismissRevision(artifactId: string, revisionIndex: number): Promise<void> {
+    this.pendingRevisions.splice(revisionIndex, 1);
+    this.updateWebview();
+  }
+
+  private async handleApplyAllRevisions(artifactId: string): Promise<void> {
+    for (const revision of this.pendingRevisions) {
+      if (revision.revisionType === 'modify' || revision.revisionType === 'add') {
+        await this.implPlanProvider.updateSection(artifactId, revision.sectionId, {
+          description: revision.proposedContent,
+        });
+      } else if (revision.revisionType === 'remove') {
+        await this.implPlanProvider.deleteSection(artifactId, revision.sectionId);
+      }
+    }
+
+    this.pendingRevisions = [];
+    this.updateWebview();
+
+    vscode.window.showInformationMessage('All revisions applied successfully.');
+  }
+
+  private async handleDismissAllRevisions(_artifactId: string): Promise<void> {
+    this.pendingRevisions = [];
+    this.updateWebview();
+  }
+
+  // ============ Ask Claude Handler ============
+
+  private readonly _onAskClaude = new vscode.EventEmitter<{
+    artifactId: string;
+    threadId: string;
+    sectionId?: string;
+  }>();
+  public readonly onAskClaude = this._onAskClaude.event;
+
+  private async handleAskClaude(artifactId: string, threadId: string, sectionId?: string): Promise<void> {
+    this._onAskClaude.fire({ artifactId, threadId, sectionId });
+    vscode.window.showInformationMessage('Asking Claude for a response...');
   }
 
   /**
@@ -1170,6 +1345,242 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
       max-height: 400px;
       overflow-y: auto;
     }
+
+    /* Claude State Indicator */
+    .claude-state-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+
+    .claude-state-indicator .state-icon {
+      font-size: 18px;
+    }
+
+    .claude-state-indicator .state-label {
+      font-weight: 500;
+    }
+
+    .claude-state-indicator .state-progress {
+      flex: 1;
+      max-width: 150px;
+      height: 6px;
+      background: var(--vscode-progressBar-background);
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .claude-state-indicator .progress-label {
+      font-size: 0.8em;
+      color: var(--vscode-descriptionForeground);
+      margin-left: 8px;
+    }
+
+    /* Options Selector */
+    .options-selector {
+      border: 2px solid var(--vscode-button-background);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      background: var(--vscode-editor-inactiveSelectionBackground);
+    }
+
+    .options-header h3 {
+      margin: 0 0 8px 0;
+      color: var(--vscode-button-background);
+    }
+
+    .options-prompt {
+      margin: 0 0 16px 0;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .options-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .option-card {
+      padding: 12px 16px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: var(--vscode-editor-background);
+    }
+
+    .option-card:hover {
+      background: var(--vscode-list-hoverBackground);
+      border-color: var(--vscode-button-background);
+    }
+
+    .option-card.recommended {
+      border-color: var(--vscode-testing-iconPassed);
+      border-width: 2px;
+    }
+
+    .option-card .option-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .option-card .option-title {
+      font-weight: 600;
+    }
+
+    .recommended-badge {
+      background: var(--vscode-testing-iconPassed);
+      color: white;
+      padding: 2px 6px;
+      border-radius: 10px;
+      font-size: 0.7em;
+    }
+
+    .effort-badge {
+      padding: 2px 6px;
+      border-radius: 10px;
+      font-size: 0.7em;
+    }
+
+    .effort-low { background: var(--vscode-testing-iconPassed); color: white; }
+    .effort-medium { background: var(--vscode-charts-yellow); color: black; }
+    .effort-high { background: var(--vscode-charts-red); color: white; }
+
+    .option-description {
+      margin: 0;
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.9em;
+    }
+
+    .option-pros, .option-cons {
+      margin-top: 8px;
+      font-size: 0.85em;
+    }
+
+    .option-pros ul, .option-cons ul {
+      margin: 4px 0 0 0;
+      padding-left: 20px;
+    }
+
+    .option-pros { color: var(--vscode-testing-iconPassed); }
+    .option-cons { color: var(--vscode-charts-red); }
+
+    .custom-option {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .custom-option textarea {
+      width: 100%;
+      min-height: 60px;
+      margin-bottom: 8px;
+    }
+
+    /* Pending Revisions */
+    .pending-revisions {
+      border: 2px dashed var(--vscode-charts-orange);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      background: rgba(255, 165, 0, 0.05);
+    }
+
+    .pending-revisions h3 {
+      margin: 0 0 8px 0;
+      color: var(--vscode-charts-orange);
+    }
+
+    .revision-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .revision-suggestion {
+      padding: 12px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+    }
+
+    .revision-header {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .revision-type {
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.75em;
+      font-weight: 600;
+    }
+
+    .revision-modify { background: var(--vscode-charts-yellow); color: black; }
+    .revision-add { background: var(--vscode-testing-iconPassed); color: white; }
+    .revision-remove { background: var(--vscode-charts-red); color: white; }
+
+    .revision-reason {
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 8px;
+    }
+
+    .revision-content pre {
+      padding: 8px;
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 0.85em;
+    }
+
+    .revision-original {
+      margin-bottom: 8px;
+    }
+
+    .revision-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .revision-bulk-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    /* Ask Claude Button */
+    .ask-claude-btn {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8em;
+      margin-left: 8px;
+    }
+
+    .ask-claude-btn:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+
+    .thread-pending .thread-header {
+      background: var(--vscode-inputValidation-warningBackground);
+    }
   </style>
 </head>
 <body>
@@ -1435,6 +1846,63 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+
+        // ============ Option Selection Actions ============
+        case 'select-option':
+          vscode.postMessage({
+            type: 'selectOption',
+            artifactId,
+            optionId: target.dataset.optionId
+          });
+          break;
+
+        case 'submit-custom': {
+          const customInput = document.getElementById('custom-response');
+          if (customInput && customInput.value.trim()) {
+            vscode.postMessage({
+              type: 'submitCustomOption',
+              artifactId,
+              customResponse: customInput.value.trim()
+            });
+          }
+          break;
+        }
+
+        // ============ Revision Actions ============
+        case 'apply-revision':
+          vscode.postMessage({
+            type: 'applyRevision',
+            artifactId,
+            revisionIndex: parseInt(target.dataset.revisionIndex)
+          });
+          break;
+
+        case 'dismiss-revision':
+          vscode.postMessage({
+            type: 'dismissRevision',
+            artifactId,
+            revisionIndex: parseInt(target.dataset.revisionIndex)
+          });
+          break;
+
+        case 'apply-all-revisions':
+          vscode.postMessage({ type: 'applyAllRevisions', artifactId });
+          break;
+
+        case 'dismiss-all-revisions':
+          vscode.postMessage({ type: 'dismissAllRevisions', artifactId });
+          break;
+
+        // ============ Ask Claude Action ============
+        case 'ask-claude': {
+          vscode.postMessage({
+            type: 'askClaude',
+            artifactId,
+            threadId: target.dataset.threadId,
+            sectionId: target.dataset.sectionId
+          });
+          break;
+        }
       }
     });
 
@@ -1480,6 +1948,10 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
    */
   private renderArtifact(artifact: Artifact): string {
     return `
+      ${this.renderClaudeStateIndicator()}
+      ${this.renderOptionsSelector()}
+      ${this.renderPendingRevisions(artifact)}
+
       <div class="artifact-header">
         <div>
           <h1 class="artifact-title">${escapeHtml(artifact.title)}</h1>
@@ -1494,6 +1966,157 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
 
       ${this.renderActions(artifact)}
       ${this.renderComments(artifact)}
+    `;
+  }
+
+  /**
+   * Render Claude state indicator
+   */
+  private renderClaudeStateIndicator(): string {
+    if (!this.currentClaudeState || this.currentClaudeState.state === 'idle') {
+      return '';
+    }
+
+    const stateIcons: Record<string, string> = {
+      'thinking': '🔄',
+      'planning': '📋',
+      'executing': '⚡',
+      'waiting-for-input': '💬',
+      'waiting-for-approval': '👁️',
+      'error': '❌',
+    };
+
+    const stateColors: Record<string, string> = {
+      'thinking': 'var(--vscode-charts-yellow)',
+      'planning': 'var(--vscode-charts-blue)',
+      'executing': 'var(--vscode-charts-green)',
+      'waiting-for-input': 'var(--vscode-charts-orange)',
+      'waiting-for-approval': 'var(--vscode-charts-purple)',
+      'error': 'var(--vscode-charts-red)',
+    };
+
+    const icon = stateIcons[this.currentClaudeState.state] || '⚪';
+    const color = stateColors[this.currentClaudeState.state] || 'var(--vscode-foreground)';
+    const description = this.currentClaudeState.description || this.currentClaudeState.state;
+    const progress = this.currentClaudeState.progress;
+
+    return `
+      <div class="claude-state-indicator" style="border-left: 3px solid ${color};">
+        <span class="state-icon">${icon}</span>
+        <span class="state-label">${escapeHtml(description)}</span>
+        ${progress ? `
+          <div class="state-progress">
+            <div class="progress-bar" style="width: ${(progress.current / progress.total) * 100}%"></div>
+            <span class="progress-label">${progress.current}/${progress.total}</span>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Render options selector UI
+   */
+  private renderOptionsSelector(): string {
+    if (!this.pendingOptions) {
+      return '';
+    }
+
+    const { artifactId, prompt, options, allowCustom } = this.pendingOptions;
+
+    return `
+      <div class="options-selector" data-artifact-id="${artifactId}">
+        <div class="options-header">
+          <h3>Claude is asking for your input</h3>
+          <p class="options-prompt">${escapeHtml(prompt)}</p>
+        </div>
+
+        <div class="options-list">
+          ${options.map(opt => `
+            <div class="option-card ${opt.recommended ? 'recommended' : ''}"
+                 data-action="select-option"
+                 data-artifact-id="${artifactId}"
+                 data-option-id="${opt.id}">
+              <div class="option-header">
+                <span class="option-title">${escapeHtml(opt.title)}</span>
+                ${opt.recommended ? '<span class="recommended-badge">Recommended</span>' : ''}
+                ${opt.estimatedEffort ? `<span class="effort-badge effort-${opt.estimatedEffort}">${opt.estimatedEffort}</span>` : ''}
+              </div>
+              <p class="option-description">${escapeHtml(opt.description)}</p>
+              ${opt.pros && opt.pros.length > 0 ? `
+                <div class="option-pros">
+                  <strong>Pros:</strong>
+                  <ul>${opt.pros.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
+                </div>
+              ` : ''}
+              ${opt.cons && opt.cons.length > 0 ? `
+                <div class="option-cons">
+                  <strong>Cons:</strong>
+                  <ul>${opt.cons.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>
+                </div>
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+
+        ${allowCustom ? `
+          <div class="custom-option">
+            <textarea id="custom-response" placeholder="Or provide a custom response..."></textarea>
+            <button class="btn-secondary" data-action="submit-custom" data-artifact-id="${artifactId}">
+              Submit Custom Response
+            </button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Render pending revision suggestions
+   */
+  private renderPendingRevisions(artifact: Artifact): string {
+    if (this.pendingRevisions.length === 0) {
+      return '';
+    }
+
+    return `
+      <div class="pending-revisions">
+        <h3>Suggested Revisions from Claude</h3>
+        <p>Based on your comments, Claude suggests the following changes:</p>
+
+        <div class="revision-list">
+          ${this.pendingRevisions.map((rev, index) => `
+            <div class="revision-suggestion" data-revision-index="${index}">
+              <div class="revision-header">
+                <span class="revision-type revision-${rev.revisionType}">${rev.revisionType}</span>
+                <span class="revision-section">Section: ${rev.sectionId}</span>
+              </div>
+              <div class="revision-reason">${escapeHtml(rev.reason)}</div>
+              <div class="revision-content">
+                ${rev.originalContent ? `
+                  <div class="revision-original">
+                    <strong>Original:</strong>
+                    <pre>${escapeHtml(rev.originalContent)}</pre>
+                  </div>
+                ` : ''}
+                <div class="revision-proposed">
+                  <strong>Proposed:</strong>
+                  <pre>${escapeHtml(rev.proposedContent)}</pre>
+                </div>
+              </div>
+              <div class="revision-actions">
+                <button class="btn-primary btn-small" data-action="apply-revision" data-artifact-id="${artifact.id}" data-revision-index="${index}">Apply</button>
+                <button class="btn-secondary btn-small" data-action="dismiss-revision" data-artifact-id="${artifact.id}" data-revision-index="${index}">Dismiss</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="revision-bulk-actions">
+          <button class="btn-primary" data-action="apply-all-revisions" data-artifact-id="${artifact.id}">Apply All</button>
+          <button class="btn-secondary" data-action="dismiss-all-revisions" data-artifact-id="${artifact.id}">Dismiss All</button>
+        </div>
+      </div>
     `;
   }
 
@@ -1934,6 +2557,8 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
   public dispose(): void {
     this._panel?.dispose();
     this._onDidSendFeedback.dispose();
+    this._onOptionSelected.dispose();
+    this._onAskClaude.dispose();
     this.commentController.dispose();
   }
 }

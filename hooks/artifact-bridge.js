@@ -118,6 +118,70 @@ function getOutboxPath(workspacePath) {
 }
 
 /**
+ * Get the state path for a workspace
+ */
+function getStatePath(workspacePath) {
+  const projectId = generateProjectId(workspacePath);
+  return path.join(GLOBAL_ARTIFACTS_PATH, projectId, 'state');
+}
+
+// ============================================
+// Claude State Broadcasting
+// ============================================
+
+/**
+ * Tool name to Claude state mapping
+ */
+const TOOL_STATE_MAP = {
+  'Read': { state: 'thinking', desc: 'Reading files...' },
+  'Glob': { state: 'thinking', desc: 'Searching for files...' },
+  'Grep': { state: 'thinking', desc: 'Searching code...' },
+  'Write': { state: 'executing', desc: 'Writing file...' },
+  'Edit': { state: 'executing', desc: 'Editing file...' },
+  'Bash': { state: 'executing', desc: 'Running command...' },
+  'Task': { state: 'thinking', desc: 'Launching agent...' },
+  'TodoWrite': { state: 'executing', desc: 'Updating tasks...' },
+  'EnterPlanMode': { state: 'planning', desc: 'Creating plan...' },
+  'ExitPlanMode': { state: 'waiting-for-approval', desc: 'Waiting for plan approval...' },
+  'AskUserQuestion': { state: 'waiting-for-input', desc: 'Waiting for user input...' },
+};
+
+/**
+ * Broadcast Claude's current state to VS Code
+ */
+function broadcastClaudeState(workspacePath, state, description, progress = null) {
+  try {
+    const statePath = getStatePath(workspacePath);
+    const stateFile = path.join(statePath, 'current.json');
+
+    // Ensure state directory exists
+    if (!fs.existsSync(statePath)) {
+      fs.mkdirSync(statePath, { recursive: true });
+    }
+
+    const stateData = {
+      state,
+      description,
+      progress,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    fs.writeFileSync(stateFile, JSON.stringify(stateData, null, 2));
+    log(`State broadcast: ${state} - ${description}`);
+  } catch (error) {
+    log(`Error broadcasting state: ${error.message}`);
+  }
+}
+
+/**
+ * Clear Claude state (set to idle)
+ */
+function clearClaudeState(workspacePath) {
+  broadcastClaudeState(workspacePath, 'idle', 'Ready');
+}
+
+/**
  * Find the latest plan file in ~/.claude/plans/
  */
 function findLatestPlanFile(afterTime = 0) {
@@ -264,6 +328,127 @@ function waitForApproval(workspacePath, planId, timeoutMs = 300000) {
 
   console.log('[artifact-bridge] Approval timeout');
   return { approved: false, reason: 'timeout' };
+}
+
+/**
+ * Wait for option selection from VS Code extension
+ */
+function waitForOptionSelection(workspacePath, optionId, timeoutMs = 300000) {
+  const outboxPath = getOutboxPath(workspacePath);
+  const startTime = Date.now();
+  const pollInterval = 500; // 500ms
+
+  log(`Waiting for option selection: ${optionId}`);
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      if (fs.existsSync(outboxPath)) {
+        const files = fs.readdirSync(outboxPath)
+          .filter(f => f.endsWith('.json'))
+          .sort();
+
+        for (const file of files) {
+          const filePath = path.join(outboxPath, file);
+          const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+          // Check if this is an option selection response
+          if (content.type === 'option-response' &&
+              content.payload?.artifactId === optionId &&
+              content.payload?.action === 'option-selected') {
+            fs.unlinkSync(filePath);
+            log(`Option selected: ${content.payload.selectedOptionId || content.payload.customResponse}`);
+            return content.payload;
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore read errors, continue polling
+    }
+
+    // Sleep for poll interval
+    const waitUntil = Date.now() + pollInterval;
+    while (Date.now() < waitUntil) {
+      // Busy wait
+    }
+  }
+
+  log('Option selection timeout');
+  return { selectedOptionId: null, reason: 'timeout' };
+}
+
+// ============================================
+// AskUserQuestion Hooking
+// ============================================
+
+/**
+ * Handle PreToolUse AskUserQuestion - present options in VS Code
+ */
+function handlePreAskUserQuestion(stdinData) {
+  try {
+    const data = JSON.parse(stdinData);
+    const workspacePath = data.cwd;
+    const questions = data.tool_input?.questions || [];
+
+    if (!questions.length) {
+      log('No questions in AskUserQuestion, allowing to proceed');
+      return true;
+    }
+
+    log(`AskUserQuestion intercepted with ${questions.length} question(s)`);
+
+    // Broadcast waiting state
+    broadcastClaudeState(workspacePath, 'waiting-for-input', 'Waiting for your input...');
+
+    // Create unique option ID
+    const optionId = `question-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Transform questions to options message
+    const firstQuestion = questions[0];
+    const options = (firstQuestion.options || []).map((opt, index) => ({
+      id: `opt-${index}`,
+      title: opt.label,
+      description: opt.description || '',
+      recommended: opt.label.toLowerCase().includes('recommended'),
+    }));
+
+    const message = createMessage('options', {
+      action: 'present-options',
+      artifactId: optionId,
+      prompt: firstQuestion.question || 'Please select an option',
+      header: firstQuestion.header || 'Options',
+      options,
+      allowCustom: true,
+      multiSelect: firstQuestion.multiSelect || false,
+      timeout: 300000,
+    });
+
+    const inboxPath = getInboxPath(workspacePath);
+    writeMessage(inboxPath, message);
+
+    log(`Options sent to VS Code: ${options.length} options`);
+
+    // Wait for user selection
+    const result = waitForOptionSelection(workspacePath, optionId);
+
+    // Clear waiting state
+    clearClaudeState(workspacePath);
+
+    if (result.selectedOptionId !== null || result.customResponse) {
+      log(`User selected: ${result.selectedOptionId || 'custom response'}`);
+      // The selection will be available to Claude through the normal flow
+      return true;
+    }
+
+    if (result.reason === 'timeout') {
+      log('Option selection timed out, allowing normal flow');
+      return true;
+    }
+
+    return true;
+  } catch (error) {
+    log(`Error in handlePreAskUserQuestion: ${error.message}`);
+    return true;
+  }
 }
 
 /**
@@ -775,17 +960,34 @@ async function handlePreToolUse(stdinData) {
     const data = JSON.parse(stdinData);
     const hookEvent = data.hook_event_name;
     const toolName = data.tool_name;
+    const workspacePath = data.cwd;
 
     log(`PreToolUse: ${toolName}`);
 
+    // Broadcast state for this tool
+    const stateInfo = TOOL_STATE_MAP[toolName];
+    if (stateInfo) {
+      broadcastClaudeState(workspacePath, stateInfo.state, stateInfo.desc);
+    }
+
+    // Handle ExitPlanMode - requires approval
     if (toolName === 'ExitPlanMode') {
       const approved = handlePreExitPlanMode(stdinData);
       if (!approved) {
         log('Blocking ExitPlanMode (user rejected)');
+        clearClaudeState(workspacePath);
         process.exit(1); // Block the tool
       }
       log('Allowing ExitPlanMode to proceed');
+      clearClaudeState(workspacePath);
       process.exit(0); // Allow the tool
+    }
+
+    // Handle AskUserQuestion - present in VS Code
+    if (toolName === 'AskUserQuestion') {
+      handlePreAskUserQuestion(stdinData);
+      // Always allow to proceed - selection is handled asynchronously
+      process.exit(0);
     }
 
     // For other PreToolUse events, allow to proceed
@@ -811,6 +1013,9 @@ function handlePostToolUse() {
   }
 
   console.log(`[artifact-bridge] PostToolUse: ${toolName}`);
+
+  // Clear state after tool completes (set to idle)
+  clearClaudeState(workspacePath);
 
   switch (toolName) {
     case 'TodoWrite':
