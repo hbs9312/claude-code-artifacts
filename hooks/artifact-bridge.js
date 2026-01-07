@@ -35,10 +35,56 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const readline = require('readline');
+
+/**
+ * Read all data from stdin (for PreToolUse hooks)
+ */
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = '';
+
+    // Check if stdin has data (non-TTY means piped input)
+    if (process.stdin.isTTY) {
+      resolve(null);
+      return;
+    }
+
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on('end', () => {
+      resolve(data.trim() || null);
+    });
+
+    // Timeout after 100ms if no data
+    setTimeout(() => {
+      if (!data) {
+        resolve(null);
+      }
+    }, 100);
+  });
+}
 
 // Configuration
 const GLOBAL_ARTIFACTS_PATH = path.join(os.homedir(), '.claude-artifacts');
 const PROJECTS_FILE = path.join(GLOBAL_ARTIFACTS_PATH, 'projects.json');
+const LOG_FILE = path.join(GLOBAL_ARTIFACTS_PATH, 'bridge.log');
+
+/**
+ * Log to file for debugging
+ */
+function log(message) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message}\n`;
+  try {
+    fs.appendFileSync(LOG_FILE, logMessage);
+  } catch (e) {
+    // Ignore log errors
+  }
+  console.log(`[artifact-bridge] ${message}`);
+}
 
 // State file for tracking changes across tool calls
 const getStateFile = (workspacePath) => {
@@ -61,6 +107,163 @@ function generateProjectId(workspacePath) {
 function getInboxPath(workspacePath) {
   const projectId = generateProjectId(workspacePath);
   return path.join(GLOBAL_ARTIFACTS_PATH, projectId, 'inbox');
+}
+
+/**
+ * Get the outbox path for a workspace (VS Code -> CLI)
+ */
+function getOutboxPath(workspacePath) {
+  const projectId = generateProjectId(workspacePath);
+  return path.join(GLOBAL_ARTIFACTS_PATH, projectId, 'outbox');
+}
+
+/**
+ * Find the latest plan file in ~/.claude/plans/
+ */
+function findLatestPlanFile(afterTime = 0) {
+  const plansDir = path.join(os.homedir(), '.claude', 'plans');
+
+  if (!fs.existsSync(plansDir)) {
+    return null;
+  }
+
+  const files = fs.readdirSync(plansDir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => ({
+      name: f,
+      path: path.join(plansDir, f),
+      mtime: fs.statSync(path.join(plansDir, f)).mtimeMs
+    }))
+    .filter(f => f.mtime > afterTime)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  return files.length > 0 ? files[0].path : null;
+}
+
+/**
+ * Parse plan markdown into sections
+ */
+function parsePlanMarkdown(content) {
+  const lines = content.split('\n');
+  const sections = [];
+  let currentSection = null;
+  let title = 'Implementation Plan';
+  let summary = '';
+
+  for (const line of lines) {
+    // Extract title from first h1
+    if (line.startsWith('# ') && !title.includes(':')) {
+      title = line.substring(2).trim();
+      continue;
+    }
+
+    // h2 starts a new section
+    if (line.startsWith('## ')) {
+      if (currentSection) {
+        sections.push(currentSection);
+      }
+      currentSection = {
+        id: `section-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        title: line.substring(3).trim(),
+        description: '',
+        files: [],
+        changes: [],
+        order: sections.length
+      };
+      continue;
+    }
+
+    // Add content to current section or summary
+    if (currentSection) {
+      currentSection.description += line + '\n';
+
+      // Extract file paths from the content (patterns like `path/to/file.ts`)
+      const fileMatches = line.match(/`([^`]+\.[a-z]+)`/g);
+      if (fileMatches) {
+        for (const match of fileMatches) {
+          const filePath = match.replace(/`/g, '');
+          if (!currentSection.files.includes(filePath)) {
+            currentSection.files.push(filePath);
+            currentSection.changes.push({
+              filePath,
+              changeType: 'modify',
+              description: ''
+            });
+          }
+        }
+      }
+    } else if (line.trim() && !line.startsWith('#')) {
+      summary += line + '\n';
+    }
+  }
+
+  if (currentSection) {
+    sections.push(currentSection);
+  }
+
+  // Trim descriptions
+  sections.forEach(s => {
+    s.description = s.description.trim();
+  });
+
+  return { title, summary: summary.trim(), sections };
+}
+
+/**
+ * Wait for approval from VS Code extension
+ */
+function waitForApproval(workspacePath, planId, timeoutMs = 300000) {
+  const outboxPath = getOutboxPath(workspacePath);
+  const startTime = Date.now();
+  const pollInterval = 1000; // 1 second
+
+  console.log('[artifact-bridge] Waiting for approval from VS Code...');
+  console.log('[artifact-bridge] (Timeout:', timeoutMs / 1000, 'seconds)');
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      if (fs.existsSync(outboxPath)) {
+        const files = fs.readdirSync(outboxPath)
+          .filter(f => f.endsWith('.json'))
+          .sort();
+
+        for (const file of files) {
+          const filePath = path.join(outboxPath, file);
+          const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+          // Check if this is an approval for our plan
+          if (content.type === 'feedback' &&
+              content.payload?.artifactId === planId &&
+              content.payload?.action === 'proceed') {
+            // Remove the processed file
+            fs.unlinkSync(filePath);
+            console.log('[artifact-bridge] Approval received!');
+            return { approved: true };
+          }
+
+          // Check for rejection
+          if (content.type === 'feedback' &&
+              content.payload?.artifactId === planId &&
+              content.payload?.action === 'reject') {
+            fs.unlinkSync(filePath);
+            console.log('[artifact-bridge] Plan rejected by user');
+            return { approved: false, reason: 'rejected' };
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore read errors, continue polling
+    }
+
+    // Sleep for poll interval
+    const waitUntil = Date.now() + pollInterval;
+    while (Date.now() < waitUntil) {
+      // Busy wait (Node.js doesn't have sleep)
+    }
+  }
+
+  console.log('[artifact-bridge] Approval timeout');
+  return { approved: false, reason: 'timeout' };
 }
 
 /**
@@ -343,14 +546,16 @@ function updateWalkthroughArtifact(workspacePath, state) {
 function handleEnterPlanMode(toolInput, workspacePath) {
   try {
     const planId = `impl-plan-${Date.now()}`;
+    const planStartTime = Date.now();
 
-    // Save plan ID to state file for ExitPlanMode to use
+    // Save plan ID and start time to state file for ExitPlanMode to use
     const stateFile = getStateFile(workspacePath);
     let state = {};
     try {
       state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
     } catch {}
     state.currentPlanId = planId;
+    state.planStartTime = planStartTime;
     fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 
     const message = createMessage('artifact', {
@@ -359,8 +564,8 @@ function handleEnterPlanMode(toolInput, workspacePath) {
         id: planId,
         type: 'implementation-plan',
         title: 'Implementation Plan',
-        status: 'pending-review',
-        summary: 'Claude Code is entering planning mode. Please review the implementation plan.',
+        status: 'draft',
+        summary: 'Claude Code is creating a plan...',
         sections: [],
         estimatedChanges: 0,
         comments: [],
@@ -379,16 +584,18 @@ function handleEnterPlanMode(toolInput, workspacePath) {
 }
 
 /**
- * Handle ExitPlanMode - finalize Implementation Plan (ready for user review)
+ * Handle ExitPlanMode - finalize Implementation Plan and wait for user approval
  */
 function handleExitPlanMode(toolInput, workspacePath) {
   try {
-    // Read plan ID from state file
+    // Read plan ID and start time from state file
     const stateFile = getStateFile(workspacePath);
     let planId = null;
+    let planStartTime = 0;
     try {
       const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
       planId = state.currentPlanId;
+      planStartTime = state.planStartTime || 0;
     } catch {}
 
     if (!planId) {
@@ -396,22 +603,156 @@ function handleExitPlanMode(toolInput, workspacePath) {
       return;
     }
 
-    // Update plan summary to indicate it's ready for review
-    // Status remains 'pending-review' - user approves via VS Code extension
+    // Find and read the plan file
+    const planFilePath = findLatestPlanFile(planStartTime);
+    let planContent = { title: 'Implementation Plan', summary: '', sections: [] };
+
+    if (planFilePath) {
+      console.log('[artifact-bridge] Found plan file:', planFilePath);
+      const fileContent = fs.readFileSync(planFilePath, 'utf-8');
+      planContent = parsePlanMarkdown(fileContent);
+    } else {
+      console.warn('[artifact-bridge] No plan file found');
+    }
+
+    // Update artifact with full plan content
     const message = createMessage('artifact', {
       action: 'update',
       artifact: {
         id: planId,
-        summary: 'Planning complete. Please review and approve the implementation plan.',
+        title: planContent.title,
+        summary: planContent.summary || 'Please review and approve the implementation plan.',
+        sections: planContent.sections,
+        estimatedChanges: planContent.sections.reduce((sum, s) => sum + s.changes.length, 0),
+        status: 'pending-review',
+        updatedAt: new Date().toISOString(),
       },
     });
 
     const inboxPath = getInboxPath(workspacePath);
     writeMessage(inboxPath, message);
 
-    console.log('[artifact-bridge] Implementation Plan ready for review, ID:', planId);
+    console.log('[artifact-bridge] Implementation Plan updated with content');
+    console.log('[artifact-bridge] Sections:', planContent.sections.length);
+
+    // Wait for approval from VS Code
+    const result = waitForApproval(workspacePath, planId);
+
+    if (result.approved) {
+      // Update status to approved
+      const approvalMessage = createMessage('artifact', {
+        action: 'update',
+        artifact: {
+          id: planId,
+          status: 'approved',
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      writeMessage(inboxPath, approvalMessage);
+      console.log('[artifact-bridge] Plan approved, proceeding with implementation');
+    } else {
+      console.log('[artifact-bridge] Plan not approved:', result.reason);
+      // Exit with error to signal CLI to stop
+      if (result.reason === 'rejected') {
+        process.exit(1);
+      }
+    }
   } catch (error) {
     console.error('[artifact-bridge] Error handling ExitPlanMode:', error.message);
+  }
+}
+
+/**
+ * Handle PreToolUse ExitPlanMode - intercept before user approval
+ * This is called BEFORE the tool executes, allowing us to:
+ * 1. Show the plan in VS Code
+ * 2. Wait for user approval
+ * 3. Return exit code 0 (approve) or 1 (reject)
+ */
+function handlePreExitPlanMode(stdinData) {
+  try {
+    const data = JSON.parse(stdinData);
+    const workspacePath = data.cwd;
+    const planContent = data.tool_input?.plan || '';
+
+    if (!planContent) {
+      log('No plan content in PreToolUse, skipping');
+      return true; // Allow to proceed
+    }
+
+    log('PreToolUse ExitPlanMode intercepted');
+    log(`Plan content length: ${planContent.length}`);
+
+    // Parse the plan content first to get title
+    const parsed = parsePlanMarkdown(planContent);
+
+    // Generate ID based on title hash (same title = update, different title = new)
+    const titleHash = crypto.createHash('md5')
+      .update(parsed.title || 'untitled')
+      .digest('hex')
+      .substring(0, 8);
+    const planId = `impl-plan-${titleHash}`;
+    log(`Plan title: ${parsed.title}, ID: ${planId}`);
+
+    // Create artifact with full plan content
+    const message = createMessage('artifact', {
+      action: 'create',
+      artifact: {
+        id: planId,
+        type: 'implementation-plan',
+        title: parsed.title || 'Implementation Plan',
+        summary: parsed.summary || 'Please review and approve the implementation plan.',
+        sections: parsed.sections,
+        estimatedChanges: parsed.sections.reduce((sum, s) => sum + s.changes.length, 0),
+        status: 'pending-review',
+        comments: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const inboxPath = getInboxPath(workspacePath);
+    writeMessage(inboxPath, message);
+
+    log(`Workspace: ${workspacePath}`);
+    log(`Inbox path: ${inboxPath}`);
+    log('Implementation Plan sent to VS Code for review');
+    log(`Plan ID: ${planId}`);
+    log(`Sections: ${parsed.sections.length}`);
+
+    // Wait for approval from VS Code
+    const result = waitForApproval(workspacePath, planId);
+
+    if (result.approved) {
+      // Update status to approved
+      const approvalMessage = createMessage('artifact', {
+        action: 'update',
+        artifact: {
+          id: planId,
+          status: 'approved',
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      writeMessage(inboxPath, approvalMessage);
+      log('Plan APPROVED - allowing ExitPlanMode to proceed');
+      return true; // exit 0 - allow tool to execute
+    } else {
+      log(`Plan REJECTED: ${result.reason}`);
+      // Update status to draft (rejected)
+      const rejectMessage = createMessage('artifact', {
+        action: 'update',
+        artifact: {
+          id: planId,
+          status: 'draft',
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      writeMessage(inboxPath, rejectMessage);
+      return false; // exit 1 - block tool execution
+    }
+  } catch (error) {
+    log(`Error in handlePreExitPlanMode: ${error.message}`);
+    return true; // On error, allow to proceed
   }
 }
 
@@ -427,26 +768,49 @@ function handleClearSession(workspacePath) {
 }
 
 /**
- * Main entry point
+ * Handle PreToolUse hooks (stdin-based)
  */
-function main() {
+async function handlePreToolUse(stdinData) {
+  try {
+    const data = JSON.parse(stdinData);
+    const hookEvent = data.hook_event_name;
+    const toolName = data.tool_name;
+
+    log(`PreToolUse: ${toolName}`);
+
+    if (toolName === 'ExitPlanMode') {
+      const approved = handlePreExitPlanMode(stdinData);
+      if (!approved) {
+        log('Blocking ExitPlanMode (user rejected)');
+        process.exit(1); // Block the tool
+      }
+      log('Allowing ExitPlanMode to proceed');
+      process.exit(0); // Allow the tool
+    }
+
+    // For other PreToolUse events, allow to proceed
+    process.exit(0);
+  } catch (error) {
+    log(`Error in handlePreToolUse: ${error.message}`);
+    process.exit(0); // On error, allow to proceed
+  }
+}
+
+/**
+ * Handle PostToolUse hooks (environment variable-based)
+ */
+function handlePostToolUse() {
   const toolName = process.env.CLAUDE_TOOL_NAME;
   const toolInput = process.env.CLAUDE_TOOL_INPUT || '{}';
   const toolOutput = process.env.CLAUDE_TOOL_OUTPUT || '{}';
   const workspacePath = process.env.CLAUDE_WORKING_DIR || process.cwd();
 
-  // Special command line arguments
-  if (process.argv[2] === '--clear-session') {
-    handleClearSession(workspacePath);
-    return;
-  }
-
   if (!toolName) {
-    console.log('[artifact-bridge] No tool name provided, exiting');
+    console.log('[artifact-bridge] No tool name provided (PostToolUse)');
     return;
   }
 
-  console.log(`[artifact-bridge] Tool: ${toolName}`);
+  console.log(`[artifact-bridge] PostToolUse: ${toolName}`);
 
   switch (toolName) {
     case 'TodoWrite':
@@ -469,9 +833,10 @@ function main() {
       handleEnterPlanMode(toolInput, workspacePath);
       break;
 
-    case 'ExitPlanMode':
-      handleExitPlanMode(toolInput, workspacePath);
-      break;
+    // ExitPlanMode is now handled by PreToolUse
+    // case 'ExitPlanMode':
+    //   handleExitPlanMode(toolInput, workspacePath);
+    //   break;
 
     default:
       // Silently ignore other tools
@@ -479,5 +844,39 @@ function main() {
   }
 }
 
+/**
+ * Main entry point
+ */
+async function main() {
+  // Special command line arguments
+  if (process.argv[2] === '--clear-session') {
+    const workspacePath = process.env.CLAUDE_WORKING_DIR || process.cwd();
+    handleClearSession(workspacePath);
+    return;
+  }
+
+  // Try to read stdin first (for PreToolUse hooks)
+  const stdinData = await readStdin();
+
+  if (stdinData) {
+    // PreToolUse hook - data comes from stdin
+    try {
+      const data = JSON.parse(stdinData);
+      if (data.hook_event_name === 'PreToolUse') {
+        await handlePreToolUse(stdinData);
+        return;
+      }
+    } catch (e) {
+      // Not valid JSON, fall through to PostToolUse
+    }
+  }
+
+  // PostToolUse hook - data comes from environment variables
+  handlePostToolUse();
+}
+
 // Run
-main();
+main().catch(err => {
+  console.error('[artifact-bridge] Fatal error:', err.message);
+  process.exit(1);
+});

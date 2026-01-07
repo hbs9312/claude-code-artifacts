@@ -98,63 +98,17 @@ export class MessageHandler implements vscode.Disposable {
   }
 
   /**
-   * Handle artifact creation from CLI
+   * Handle artifact creation from CLI (uses upsert to preserve IDs)
    */
   private async handleCreate(message: ArtifactCreateMessage): Promise<void> {
     const artifact = message.artifact;
-    let createdArtifact: Artifact | undefined;
 
-    switch (artifact.type) {
-      case 'task-list':
-        createdArtifact = await this.artifactManager.createTaskList(artifact.title);
-        // Update with full data
-        if (createdArtifact) {
-          const taskListData = artifact as TaskListArtifact;
-          await this.artifactManager.updateArtifact(createdArtifact.id, {
-            items: taskListData.items || [],
-            status: taskListData.status,
-          });
-        }
-        break;
-
-      case 'implementation-plan':
-        const planData = artifact as ImplementationPlanArtifact;
-        createdArtifact = await this.artifactManager.createImplementationPlan(
-          artifact.title,
-          planData.summary || ''
-        );
-        if (createdArtifact) {
-          await this.artifactManager.updateArtifact(createdArtifact.id, {
-            sections: planData.sections || [],
-            estimatedChanges: planData.estimatedChanges || 0,
-            status: planData.status,
-          });
-        }
-        break;
-
-      case 'walkthrough':
-        const walkthroughData = artifact as WalkthroughArtifact;
-        createdArtifact = await this.artifactManager.createWalkthrough(
-          artifact.title,
-          walkthroughData.summary || ''
-        );
-        if (createdArtifact) {
-          await this.artifactManager.updateArtifact(createdArtifact.id, {
-            sections: walkthroughData.sections || [],
-            changedFiles: walkthroughData.changedFiles || [],
-            keyPoints: walkthroughData.keyPoints || [],
-            status: walkthroughData.status,
-          });
-        }
-        break;
-    }
+    // Use upsert to preserve the ID from CLI
+    const createdArtifact = await this.artifactManager.upsertArtifact(artifact);
 
     if (createdArtifact) {
       // Show the artifact panel
-      const updatedArtifact = this.artifactManager.getArtifact(createdArtifact.id);
-      if (updatedArtifact) {
-        this.artifactProvider.showArtifactPanel(updatedArtifact);
-      }
+      this.artifactProvider.showArtifactPanel(createdArtifact);
 
       // Notify user
       vscode.window.showInformationMessage(`Artifact created: ${artifact.title}`);
@@ -162,24 +116,53 @@ export class MessageHandler implements vscode.Disposable {
   }
 
   /**
-   * Handle artifact update from CLI
+   * Handle artifact update from CLI (with upsert support)
    */
   private async handleUpdate(message: ArtifactUpdateMessage): Promise<void> {
     const { id, ...updates } = message.artifact;
-    const artifact = this.artifactManager.getArtifact(id);
+    const existingArtifact = this.artifactManager.getArtifact(id);
+    const artifactData = message.artifact as any;
 
-    if (!artifact) {
+    // Upsert: if artifact doesn't exist and we have type info, create it
+    if (!existingArtifact && artifactData.type) {
+      console.log('Artifact not found, creating via upsert:', id);
+      const newArtifact = await this.artifactManager.upsertArtifact({
+        ...artifactData,
+        id,
+        createdAt: artifactData.createdAt || new Date(),
+        updatedAt: new Date(),
+        comments: artifactData.comments || [],
+      });
+      this.artifactProvider.showArtifactPanel(newArtifact);
+      vscode.window.showInformationMessage(`Artifact created: ${newArtifact.title}`);
+      return;
+    }
+
+    if (!existingArtifact) {
       console.warn('Artifact not found for update:', id);
       await this.ipcClient.sendError('ARTIFACT_NOT_FOUND', `Artifact ${id} not found`);
       return;
     }
 
-    await this.artifactManager.updateArtifact(id, updates);
+    // Merge updates with existing artifact
+    const mergedArtifact = {
+      ...existingArtifact,
+      ...updates,
+      updatedAt: new Date(),
+    };
+
+    await this.artifactManager.upsertArtifact(mergedArtifact as Artifact);
+
+    // Refresh the panel
+    const updatedArtifact = this.artifactManager.getArtifact(id);
+    if (updatedArtifact) {
+      this.artifactProvider.showArtifactPanel(updatedArtifact);
+    }
 
     // Show notification if status changed
-    if (updates.status && updates.status !== artifact.status) {
+    if (updates.status && updates.status !== existingArtifact.status) {
       vscode.window.showInformationMessage(
-        `Artifact "${artifact.title}" status: ${updates.status}`
+        `Artifact "${existingArtifact.title}" status: ${updates.status}`
       );
     }
   }

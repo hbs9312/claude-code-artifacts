@@ -151,6 +151,12 @@ export interface FeedbackProceedMessage {
   action: 'proceed';
 }
 
+export interface FeedbackRejectMessage {
+  artifactId: string;
+  action: 'reject';
+  reason?: string;
+}
+
 export interface FeedbackReviewMessage {
   artifactId: string;
   action: 'review-submitted';
@@ -158,7 +164,7 @@ export interface FeedbackReviewMessage {
   feedback?: string;
 }
 
-export type FeedbackMessage = FeedbackProceedMessage | FeedbackReviewMessage;
+export type FeedbackMessage = FeedbackProceedMessage | FeedbackRejectMessage | FeedbackReviewMessage;
 
 // IPC Message wrapper for communication
 export interface IPCMessage {

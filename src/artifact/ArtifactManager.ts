@@ -63,6 +63,33 @@ export class ArtifactManager {
   }
 
   /**
+   * Add or update an artifact directly (for IPC messages with predefined IDs)
+   */
+  public async upsertArtifact(artifact: Artifact): Promise<Artifact> {
+    const existing = this.artifacts.get(artifact.id);
+
+    // Ensure dates are Date objects
+    artifact.createdAt = new Date(artifact.createdAt);
+    artifact.updatedAt = new Date(artifact.updatedAt);
+    artifact.comments = (artifact.comments || []).map(c => ({
+      ...c,
+      createdAt: new Date(c.createdAt),
+      updatedAt: c.updatedAt ? new Date(c.updatedAt) : undefined,
+    }));
+
+    this.artifacts.set(artifact.id, artifact);
+    await this.saveArtifacts();
+
+    if (existing) {
+      this._onDidUpdateArtifact.fire(artifact);
+    } else {
+      this._onDidCreateArtifact.fire(artifact);
+    }
+
+    return artifact;
+  }
+
+  /**
    * Get all artifacts
    */
   public getAllArtifacts(): Artifact[] {

@@ -138,6 +138,10 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
           await this.handleProceed(message.artifactId);
           break;
 
+        case 'reject':
+          await this.handleReject(message.artifactId, message.reason);
+          break;
+
         case 'addComment':
           await this.handleAddComment(
             message.artifactId,
@@ -281,6 +285,21 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
     });
 
     vscode.window.showInformationMessage('Artifact approved. Proceeding with execution.');
+  }
+
+  /**
+   * Handle reject action
+   */
+  private async handleReject(artifactId: string, reason?: string): Promise<void> {
+    await this.artifactManager.updateStatus(artifactId, 'draft');
+
+    this._onDidSendFeedback.fire({
+      artifactId,
+      action: 'reject',
+      reason,
+    });
+
+    vscode.window.showWarningMessage('Plan rejected. Claude Code will stop.');
   }
 
   /**
@@ -734,6 +753,11 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-button-secondaryForeground);
     }
 
+    .btn-danger {
+      background-color: var(--vscode-testing-iconFailed);
+      color: white;
+    }
+
     .comments-section {
       margin-top: 20px;
     }
@@ -1185,6 +1209,10 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
         // ============ Common Actions ============
         case 'proceed':
           vscode.postMessage({ type: 'proceed', artifactId });
+          break;
+
+        case 'reject':
+          vscode.postMessage({ type: 'reject', artifactId });
           break;
 
         case 'submit-review': {
@@ -1720,7 +1748,8 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
 
     return `
       <div class="actions">
-        ${showProceed ? `<button class="btn-primary" data-action="proceed" data-artifact-id="${artifact.id}">Proceed</button>` : ''}
+        ${showProceed ? `<button class="btn-primary" data-action="proceed" data-artifact-id="${artifact.id}">Approve</button>` : ''}
+        ${showProceed ? `<button class="btn-danger" data-action="reject" data-artifact-id="${artifact.id}">Reject</button>` : ''}
         ${showProceed ? `<button class="btn-secondary" data-action="submit-review" data-artifact-id="${artifact.id}">Submit Review</button>` : ''}
       </div>
     `;

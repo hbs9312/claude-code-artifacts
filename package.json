@@ -57,6 +57,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "claudeArtifacts.clearAllArtifacts",
+        "title": "Clear All Artifacts",
+        "category": "Claude Artifacts",
+        "icon": "$(trash)"
+      },
+      {
         "command": "claudeArtifacts.openArtifact",
         "title": "Open Artifact",
         "category": "Claude Artifacts"

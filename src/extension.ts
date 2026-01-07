@@ -134,6 +134,23 @@ export function activate(context: vscode.ExtensionContext): void {
       artifactTreeProvider.refresh();
     }),
 
+    // Clear all artifacts
+    vscode.commands.registerCommand('claudeArtifacts.clearAllArtifacts', async () => {
+      const confirm = await vscode.window.showWarningMessage(
+        'Delete all artifacts?',
+        { modal: true },
+        'Yes'
+      );
+      if (confirm === 'Yes') {
+        const artifacts = artifactManager.getAllArtifacts();
+        for (const artifact of artifacts) {
+          await artifactManager.deleteArtifact(artifact.id);
+        }
+        artifactTreeProvider.refresh();
+        vscode.window.showInformationMessage('All artifacts deleted');
+      }
+    }),
+
     // Demo command to create sample artifacts
     vscode.commands.registerCommand('claudeArtifacts.createSampleArtifacts', async () => {
       await createSampleArtifacts();
