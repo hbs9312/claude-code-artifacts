@@ -1156,8 +1156,12 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
     /* Section header */
     .section-header {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 8px;
+    }
+
+    .section-header .section-title {
+      flex: 1;
     }
 
     /* File changes */
@@ -1328,7 +1332,6 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
       cursor: pointer;
       font-size: 0.8em;
       color: var(--vscode-descriptionForeground);
-      margin-left: 8px;
     }
 
     .inline-comment-btn:hover {
