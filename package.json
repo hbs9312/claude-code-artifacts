@@ -1,0 +1,302 @@
+{
+  "name": "claude-code-artifacts",
+  "displayName": "Claude Code Artifacts",
+  "description": "Artifacts viewer for Claude Code - Task Lists, Implementation Plans, and Walkthroughs",
+  "version": "0.1.0",
+  "publisher": "claude-code",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeArtifacts.showPanel",
+        "title": "Show Artifacts Panel",
+        "category": "Claude Artifacts"
+      },
+      {
+        "command": "claudeArtifacts.createTaskList",
+        "title": "Create Task List",
+        "category": "Claude Artifacts",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "claudeArtifacts.createImplementationPlan",
+        "title": "Create Implementation Plan",
+        "category": "Claude Artifacts",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "claudeArtifacts.createWalkthrough",
+        "title": "Create Walkthrough",
+        "category": "Claude Artifacts",
+        "icon": "$(book)"
+      },
+      {
+        "command": "claudeArtifacts.createSampleArtifacts",
+        "title": "Create Sample Artifacts",
+        "category": "Claude Artifacts"
+      },
+      {
+        "command": "claudeArtifacts.deleteArtifact",
+        "title": "Delete Artifact",
+        "category": "Claude Artifacts",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeArtifacts.refreshArtifacts",
+        "title": "Refresh Artifacts",
+        "category": "Claude Artifacts",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeArtifacts.openArtifact",
+        "title": "Open Artifact",
+        "category": "Claude Artifacts"
+      },
+      {
+        "command": "claudeArtifacts.addTask",
+        "title": "Add Task",
+        "category": "Claude Artifacts",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeArtifacts.clearCompletedTasks",
+        "title": "Clear Completed Tasks",
+        "category": "Claude Artifacts",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeArtifacts.requestReview",
+        "title": "Request Review",
+        "category": "Claude Artifacts",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeArtifacts.approvePlan",
+        "title": "Approve Plan",
+        "category": "Claude Artifacts",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeArtifacts.testComments",
+        "title": "Test Comments",
+        "category": "Claude Artifacts",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "claudeArtifacts.ipcStatus",
+        "title": "IPC Status",
+        "category": "Claude Artifacts",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "claudeArtifacts.testIPC",
+        "title": "Test IPC (Simulate CLI Message)",
+        "category": "Claude Artifacts",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "claudeArtifacts.toggleAgentMode",
+        "title": "Toggle Agent Mode",
+        "category": "Claude Artifacts",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "claudeArtifacts.setPlanningMode",
+        "title": "Set Planning Mode",
+        "category": "Claude Artifacts",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "claudeArtifacts.setFastMode",
+        "title": "Set Fast Mode",
+        "category": "Claude Artifacts",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "claudeArtifacts.toggleReviewPolicy",
+        "title": "Toggle Review Policy",
+        "category": "Claude Artifacts",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "claudeArtifacts.createTaskGroup",
+        "title": "Create Task Group",
+        "category": "Claude Artifacts",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "claudeArtifacts.completeTaskGroup",
+        "title": "Complete Task Group",
+        "category": "Claude Artifacts",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeArtifacts.agentModeStatus",
+        "title": "Agent Mode Status",
+        "category": "Claude Artifacts",
+        "icon": "$(info)"
+      },
+      {
+        "command": "claudeArtifacts.setupHooks",
+        "title": "Setup Hooks (Claude Code Integration)",
+        "category": "Claude Artifacts",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "claudeArtifacts.showHookInstructions",
+        "title": "Show Hook Instructions",
+        "category": "Claude Artifacts",
+        "icon": "$(book)"
+      },
+      {
+        "command": "claudeArtifacts.showIPCInfo",
+        "title": "Show IPC Info",
+        "category": "Claude Artifacts",
+        "icon": "$(info)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeArtifacts.createTaskList",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeArtifacts.createImplementationPlan",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeArtifacts.createWalkthrough",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeArtifacts.refreshArtifacts",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeArtifacts.ipcStatus",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "2_ipc@1"
+        },
+        {
+          "command": "claudeArtifacts.testIPC",
+          "when": "view == claudeArtifacts.artifactList",
+          "group": "2_ipc@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeArtifacts.openArtifact",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeArtifacts.deleteArtifact",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeArtifacts.addTask",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact-task-list",
+          "group": "1_modify@1"
+        },
+        {
+          "command": "claudeArtifacts.clearCompletedTasks",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact-task-list",
+          "group": "1_modify@2"
+        },
+        {
+          "command": "claudeArtifacts.requestReview",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact-implementation-plan-draft",
+          "group": "1_modify@1"
+        },
+        {
+          "command": "claudeArtifacts.approvePlan",
+          "when": "view == claudeArtifacts.artifactList && viewItem == artifact-implementation-plan-pending-review",
+          "group": "1_modify@1"
+        },
+        {
+          "command": "claudeArtifacts.testComments",
+          "when": "view == claudeArtifacts.artifactList && viewItem =~ /^artifact/",
+          "group": "2_test@1"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-artifacts",
+          "title": "Claude Artifacts",
+          "icon": "$(notebook)"
+        }
+      ]
+    },
+    "views": {
+      "claude-artifacts": [
+        {
+          "id": "claudeArtifacts.artifactList",
+          "name": "Artifacts",
+          "type": "tree"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Code Artifacts",
+      "properties": {
+        "claudeArtifacts.reviewPolicy": {
+          "type": "string",
+          "default": "requestReview",
+          "enum": [
+            "alwaysProceed",
+            "requestReview"
+          ],
+          "enumDescriptions": [
+            "Agent never asks for review",
+            "Agent always asks for review"
+          ],
+          "description": "Artifact Review Policy"
+        },
+        "claudeArtifacts.autoOpenPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open Artifacts panel when a new artifact is created"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.3.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
+  },
+  "dependencies": {
+    "marked": "^11.0.0",
+    "highlight.js": "^11.9.0"
+  }
+}
