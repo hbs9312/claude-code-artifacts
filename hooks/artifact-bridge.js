@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Claude Code Artifacts - Hook Bridge Script
+ * Claude Code Artifacts - Hook Bridge Script (v1.1)
  *
  * This script bridges Claude Code CLI with the VS Code Extension
  * through file-based IPC. It's triggered by Claude Code hooks.
@@ -43,9 +43,11 @@ const readline = require('readline');
 function readStdin() {
   return new Promise((resolve) => {
     let data = '';
+    let resolved = false;
 
     // Check if stdin has data (non-TTY means piped input)
     if (process.stdin.isTTY) {
+      log('stdin is TTY, no piped data');
       resolve(null);
       return;
     }
@@ -55,15 +57,21 @@ function readStdin() {
       data += chunk;
     });
     process.stdin.on('end', () => {
-      resolve(data.trim() || null);
+      if (!resolved) {
+        resolved = true;
+        log(`stdin received ${data.length} bytes`);
+        resolve(data.trim() || null);
+      }
     });
 
-    // Timeout after 100ms if no data
+    // Timeout after 500ms if no data (increased from 100ms)
     setTimeout(() => {
-      if (!data) {
+      if (!resolved && !data) {
+        resolved = true;
+        log('stdin timeout - no data received');
         resolve(null);
       }
-    }, 100);
+    }, 500);
   });
 }
 
@@ -295,7 +303,7 @@ function waitForApproval(workspacePath, planId, timeoutMs = 300000) {
           const filePath = path.join(outboxPath, file);
           const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
 
-          // Check if this is an approval for our plan
+          // Check if this is an approval for our plan (feedback type)
           if (content.type === 'feedback' &&
               content.payload?.artifactId === planId &&
               content.payload?.action === 'proceed') {
@@ -305,13 +313,41 @@ function waitForApproval(workspacePath, planId, timeoutMs = 300000) {
             return { approved: true };
           }
 
-          // Check for rejection
+          // Check for rejection (feedback type)
           if (content.type === 'feedback' &&
               content.payload?.artifactId === planId &&
               content.payload?.action === 'reject') {
             fs.unlinkSync(filePath);
             console.log('[artifact-bridge] Plan rejected by user');
             return { approved: false, reason: 'rejected' };
+          }
+
+          // Check for approval via option-response (옵션 카드 UI에서 선택)
+          if (content.type === 'option-response' &&
+              content.payload?.artifactId === planId &&
+              content.payload?.selectedOptionId === 'approve') {
+            fs.unlinkSync(filePath);
+            console.log('[artifact-bridge] Approval received via option selection!');
+            return { approved: true };
+          }
+
+          // Check for rejection via option-response (옵션 카드 UI에서 선택)
+          if (content.type === 'option-response' &&
+              content.payload?.artifactId === planId &&
+              content.payload?.selectedOptionId === 'reject') {
+            fs.unlinkSync(filePath);
+            console.log('[artifact-bridge] Plan rejected via option selection');
+            return { approved: false, reason: 'rejected' };
+          }
+
+          // Check for custom response (옵션 카드 UI에서 커스텀 응답)
+          if (content.type === 'option-response' &&
+              content.payload?.artifactId === planId &&
+              content.payload?.customResponse) {
+            fs.unlinkSync(filePath);
+            console.log('[artifact-bridge] Custom response received:', content.payload.customResponse);
+            // 커스텀 응답은 거부로 처리 (수정 요청으로 간주)
+            return { approved: false, reason: 'custom', customResponse: content.payload.customResponse };
           }
         }
       }
@@ -633,6 +669,59 @@ function handleWrite(toolInput, workspacePath) {
 }
 
 /**
+ * Handle plan file write - trigger approval workflow
+ * Called when Claude writes to ~/.claude/plans/*.md
+ */
+function handlePlanFileWrite(planFilePath, workspacePath) {
+  try {
+    // 1. Read the plan file
+    const content = fs.readFileSync(planFilePath, 'utf-8');
+
+    // 2. Parse using existing function
+    const parsed = parsePlanMarkdown(content);
+
+    // 3. Generate artifact ID
+    const planId = `impl-plan-${Date.now()}`;
+
+    // 4. Send to inbox with pending-review status
+    const message = createMessage('artifact', {
+      action: 'create',
+      artifact: {
+        id: planId,
+        type: 'implementation-plan',
+        title: parsed.title,
+        status: 'pending-review',
+        summary: parsed.summary,
+        sections: parsed.sections,
+        estimatedChanges: parsed.sections.reduce((sum, s) => sum + s.files.length, 0),
+        comments: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: { filePath: planFilePath }
+      }
+    });
+
+    const inboxPath = getInboxPath(workspacePath);
+    writeMessage(inboxPath, message);
+
+    console.log(`[artifact-bridge] Plan file detected: ${planFilePath}`);
+    console.log(`[artifact-bridge] Waiting for user approval...`);
+
+    // 5. Wait for approval (reuse existing function)
+    const result = waitForApproval(workspacePath, planId);
+
+    // 6. Log result (Write already completed)
+    if (result.approved) {
+      console.log('[artifact-bridge] Plan approved by user');
+    } else {
+      console.log('[artifact-bridge] Plan rejected:', result.reason || 'No reason provided');
+    }
+  } catch (error) {
+    console.error('[artifact-bridge] Error handling plan file write:', error.message);
+  }
+}
+
+/**
  * Handle Edit tool - track file modifications
  */
 function handleEdit(toolInput, workspacePath) {
@@ -691,6 +780,9 @@ function handleBash(toolInput, workspacePath) {
  * Update Walkthrough artifact with current state
  */
 function updateWalkthroughArtifact(workspacePath, state) {
+  // 첫 생성 여부 확인
+  const isFirstCreate = !state.walkthroughCreated;
+
   const changedFiles = state.changedFiles.map(f => ({
     filePath: f.filePath,
     changeType: f.changeType,
@@ -704,7 +796,7 @@ function updateWalkthroughArtifact(workspacePath, state) {
   const totalRemoved = changedFiles.reduce((sum, f) => sum + f.linesRemoved, 0);
 
   const message = createMessage('artifact', {
-    action: 'update',
+    action: isFirstCreate ? 'create' : 'update',
     artifact: {
       id: 'claude-code-walkthrough',
       type: 'walkthrough',
@@ -729,6 +821,12 @@ function updateWalkthroughArtifact(workspacePath, state) {
 
   const inboxPath = getInboxPath(workspacePath);
   writeMessage(inboxPath, message);
+
+  // 첫 생성 후 플래그 저장
+  if (isFirstCreate) {
+    state.walkthroughCreated = true;
+    saveState(workspacePath, state);
+  }
 }
 
 /**
@@ -794,8 +892,9 @@ function finalizeWalkthrough(workspacePath, completedTodos) {
       order: 999,
     });
 
+    // Use 'create' action for upsert - MessageHandler will handle both create and update
     const message = createMessage('artifact', {
-      action: 'update',
+      action: 'create',
       artifact: {
         id: 'claude-code-walkthrough',
         type: 'walkthrough',
@@ -994,9 +1093,24 @@ function handlePreExitPlanMode(stdinData) {
     const inboxPath = getInboxPath(workspacePath);
     writeMessage(inboxPath, message);
 
+    // 옵션 선택 메시지 추가 전송 (Approve/Reject 카드 UI)
+    const optionsMessage = createMessage('options', {
+      action: 'present-options',
+      artifactId: planId,
+      prompt: `"${parsed.title || 'Implementation Plan'}" 플랜을 승인하시겠습니까?`,
+      options: [
+        { id: 'approve', title: 'Approve', description: '플랜을 승인하고 구현을 진행합니다', recommended: true },
+        { id: 'reject', title: 'Reject', description: '플랜을 거부하고 수정을 요청합니다' }
+      ],
+      allowCustom: true,
+      timeout: 300000
+    });
+    writeMessage(inboxPath, optionsMessage);
+
     log(`Workspace: ${workspacePath}`);
     log(`Inbox path: ${inboxPath}`);
     log('Implementation Plan sent to VS Code for review');
+    log('Options message sent for Approve/Reject selection');
     log(`Plan ID: ${planId}`);
     log(`Sections: ${parsed.sections.length}`);
 
@@ -1117,9 +1231,18 @@ function handlePostToolUse() {
       handleTodoWrite(toolInput, workspacePath);
       break;
 
-    case 'Write':
-      handleWrite(toolInput, workspacePath);
+    case 'Write': {
+      const writeInput = JSON.parse(toolInput);
+      const filePath = writeInput.file_path || writeInput.path || '';
+
+      // Plan file detection (~/.claude/plans/*.md)
+      if (filePath.includes('/.claude/plans/') && filePath.endsWith('.md')) {
+        handlePlanFileWrite(filePath, workspacePath);
+      } else {
+        handleWrite(toolInput, workspacePath);
+      }
       break;
+    }
 
     case 'Edit':
       handleEdit(toolInput, workspacePath);

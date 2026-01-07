@@ -149,12 +149,12 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
     this._currentArtifact = artifact;
 
     if (this._panel) {
-      this._panel.reveal(vscode.ViewColumn.Beside);
+      this._panel.reveal(vscode.ViewColumn.Beside, true); // preserveFocus=true to not steal focus
     } else {
       this._panel = vscode.window.createWebviewPanel(
         'artifactView',
         `Artifact: ${artifact.title}`,
-        vscode.ViewColumn.Beside,
+        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
         {
           enableScripts: true,
           retainContextWhenHidden: true,
@@ -172,6 +172,9 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
 
     this._panel.title = `Artifact: ${artifact.title}`;
     this._panel.webview.html = this.getHtmlContent(this._panel.webview, artifact);
+
+    // Force reveal to ensure panel is visible
+    this._panel.reveal(vscode.ViewColumn.Beside, true);
   }
 
   /**
@@ -1167,7 +1170,7 @@ export class ArtifactProvider implements vscode.WebviewViewProvider {
 
     /* Markdown content styles */
     .markdown-content {
-      line-height: 1.5;
+      line-height: 1.6;
     }
     .markdown-content p {
       margin: 0.4em 0;

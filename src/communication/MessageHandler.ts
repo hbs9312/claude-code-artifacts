@@ -220,6 +220,15 @@ export class MessageHandler implements vscode.Disposable {
         }
       } else {
         await this.ipcClient.sendOptionSelection(options.artifactId, selected.optionId);
+
+        // 플랜 승인/거부의 경우 아티팩트 상태 업데이트
+        if (selected.optionId === 'approve') {
+          await this.artifactManager.updateStatus(options.artifactId, 'approved');
+          vscode.window.showInformationMessage('Plan approved. Proceeding with implementation.');
+        } else if (selected.optionId === 'reject') {
+          await this.artifactManager.updateStatus(options.artifactId, 'draft');
+          vscode.window.showWarningMessage('Plan rejected. Claude Code will stop.');
+        }
       }
 
       // Clear the options selector in webview
@@ -282,16 +291,20 @@ export class MessageHandler implements vscode.Disposable {
    */
   private async handleCreate(message: ArtifactCreateMessage): Promise<void> {
     const artifact = message.artifact;
+    console.log('[MessageHandler] handleCreate called:', artifact.id, artifact.type, artifact.title);
 
     // Use upsert to preserve the ID from CLI
     const createdArtifact = await this.artifactManager.upsertArtifact(artifact);
 
     if (createdArtifact) {
+      console.log('[MessageHandler] Artifact created, showing panel:', createdArtifact.id);
       // Show the artifact panel
       this.artifactProvider.showArtifactPanel(createdArtifact);
 
       // Notify user
       vscode.window.showInformationMessage(`Artifact created: ${artifact.title}`);
+    } else {
+      console.log('[MessageHandler] Failed to create artifact');
     }
   }
 
@@ -341,9 +354,15 @@ export class MessageHandler implements vscode.Disposable {
 
     // Show notification if status changed
     if (updates.status && updates.status !== existingArtifact.status) {
-      vscode.window.showInformationMessage(
-        `Artifact "${existingArtifact.title}" status: ${updates.status}`
-      );
+      // Walkthrough 완료 시 자동으로 패널 표시
+      if (existingArtifact.type === 'walkthrough' && updates.status === 'completed') {
+        this.artifactProvider.showArtifactPanel(updatedArtifact!);
+        vscode.window.showInformationMessage(`Session completed! View your walkthrough.`);
+      } else {
+        vscode.window.showInformationMessage(
+          `Artifact "${existingArtifact.title}" status: ${updates.status}`
+        );
+      }
     }
   }
 
