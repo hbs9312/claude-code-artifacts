@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Claude Code Artifacts - Hook Bridge Script (v1.1)
+ * Claude Code Artifacts - Hook Bridge Script (v1.2)
  *
  * This script bridges Claude Code CLI with the VS Code Extension
  * through file-based IPC. It's triggered by Claude Code hooks.
@@ -1052,14 +1052,39 @@ function handlePreExitPlanMode(stdinData) {
   try {
     const data = JSON.parse(stdinData);
     const workspacePath = data.cwd;
-    const planContent = data.tool_input?.plan || '';
-
-    if (!planContent) {
-      log('No plan content in PreToolUse, skipping');
-      return true; // Allow to proceed
-    }
 
     log('PreToolUse ExitPlanMode intercepted');
+    log(`Workspace path: ${workspacePath}`);
+
+    // Read plan ID and start time from state file
+    const stateFile = getStateFile(workspacePath);
+    log(`State file: ${stateFile}`);
+    let planStartTime = 0;
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+      planStartTime = state.planStartTime || 0;
+      log(`Plan start time from state: ${planStartTime}`);
+    } catch (e) {
+      log(`Could not read state file: ${e.message}`);
+    }
+
+    // Find the latest plan file (use 0 to find any recent plan file if no start time)
+    const planFilePath = findLatestPlanFile(planStartTime > 0 ? planStartTime : Date.now() - 600000); // Look for files in last 10 minutes if no start time
+    if (!planFilePath) {
+      log('No plan file found in ~/.claude/plans/');
+      // List the plans directory for debugging
+      const plansDir = path.join(os.homedir(), '.claude', 'plans');
+      if (fs.existsSync(plansDir)) {
+        const files = fs.readdirSync(plansDir);
+        log(`Files in plans dir: ${files.join(', ')}`);
+      } else {
+        log('Plans directory does not exist');
+      }
+      return true; // Allow to proceed even if no plan file found
+    }
+
+    log(`Found plan file: ${planFilePath}`);
+    const planContent = fs.readFileSync(planFilePath, 'utf-8');
     log(`Plan content length: ${planContent.length}`);
 
     // Parse the plan content first to get title
